@@ -4,9 +4,9 @@ A tested mix for running an **Xbox Series title natively on a Windows PC**, from
 
 It is the successor of [pepezin-ai/victory-mix](https://github.com/pepezin-ai/victory-mix) (v5, fxceless base), which stays up as it was. Each time a newer build beats this one on our machine, this repository moves to it.
 
-> **v9 (preliminary numbers): about 14 to 15 fps on average** (frames the game really draws) in the opening scene (cell and balcony) on the machine below, against about 11 for v8. Frame generation through NVIDIA Streamline is in the code but **off by default**. **Not fully playable yet:** ray tracing is off, so interiors and shade are darker than intended.
+> **v9: about 14 to 15 fps on average** (frames the game really draws) in the opening scene (cell and balcony) on the machine below, against about 11 for v8. Frame generation through NVIDIA Streamline is in the code but **off by default**. **Not fully playable yet:** ray tracing is off, so interiors and shade are darker than intended.
 >
-> **Preliminary:** one run of each, noise about +-1 fps. Final figures will replace the table below.
+> Each figure is the mean of 2 to 6 runs of 120 s, run-to-run noise about +-1 fps, one machine. Treat differences under 1 fps as noise.
 
 ## Legal notice
 
@@ -68,18 +68,19 @@ The `-SeriesS` option of v7 is gone: AnyXboxX removed the script it used, and `a
 
 Tip for NVIDIA RTX 40/50: turn on **Smooth Motion** for `victory.exe` in the NVIDIA App. The numbers below are the frames the game really draws; Smooth Motion doubles what you see on screen. The game uses 20 to 22 GB of RAM: close browsers and other large programs before playing on 32 GB.
 
-## Measured on (preliminary)
+## Measured on
 
-Windows 11, AMD Ryzen 7 5700X (8C/16T), 32 GB DDR4-3200, NVIDIA RTX 5070 12 GB. Full HD output, FSR4 720p to 1080p, opening scene (cell and balcony), 120 s, **one run each, noise about +-1 fps**. Mean fps of frames the game really draws. **Preliminary: final values will replace these.**
+Windows 11, AMD Ryzen 7 5700X (8C/16T), 32 GB DDR4-3200, NVIDIA RTX 5070 12 GB. Full HD output, FSR4 720p to 1080p, opening scene (cell and balcony), 120 s, 2 to 6 runs per row, noise about +-1 fps. Mean fps of frames the game really draws.
 
 | Build / settings | fps |
 |---|---|
 | v8 (no tweaks) | ~11 |
 | v8 + frame generation / FidelityFX port + tuned env (D) | 8.5 |
-| P2: PRs + `VICTORY_WINDOWS_BAR_MB=2048` + `VICTORY_SECTION_MB=2` | ~12.3 |
-| P2 + `VICTORY_GPU_BACK_MAX_KB=64` | ~14.8 |
-| P2 + `VICTORY_GPU_BACK_MAX_KB=16` | ~15.2 |
-| New `main` (`e7118957`) + the stack (v9) | ~14.2 to 15 |
+| P2: PRs + `VICTORY_WINDOWS_BAR_MB=2048` + `VICTORY_SECTION_MB=2` | 12.3 (6 runs, 10.8 to 13.8) |
+| P2 + `VICTORY_GPU_BACK_MAX_KB=64` | 14.8 (4 runs: 14.4, 15.1, 15.2, 14.4) |
+| P2 + `VICTORY_GPU_BACK_MAX_KB=16` | 15.2 (2 runs: 16.1, 14.3) |
+| New `main` (`e7118957`) + the stack (v9), `VICTORY_GPU_BACK_MAX_KB=64` | 14.3 (4 runs: 14.8, 13.8, 13.9, 14.6) |
+| v9 with `VICTORY_GPU_BACK_MAX_KB=16` | 14.7 (3 runs: 14.4, 14.6, 15.0) |
 
 The `VICTORY_GPU_BACK_MAX_KB` rows carry the warning above.
 
