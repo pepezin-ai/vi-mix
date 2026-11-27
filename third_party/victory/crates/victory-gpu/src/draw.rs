@@ -1861,8 +1861,10 @@ impl State {
                         // fault on NVIDIA): bind a persistent 64 KiB zeroed
                         // fallback buffer, matching console null reads.
                         let Some(gpu) = crate::host::host().and_then(|h| h.zero_root_gpu()) else {
+                            once!(slot, srv, "no zero fallback buffer for unset root view: the draw is dropped");
                             return false;
                         };
+                        once!(slot, srv, "unset root CBV/SRV: binding 64 KiB zero fallback buffer");
                         // SAFETY: an open list; the fallback buffer lives with `Host`.
                         unsafe {
                             match (compute, srv) {
@@ -1890,8 +1892,15 @@ impl State {
                         Some(gpu) => (gpu, false),
                         None => {
                             let Some(gpu) = crate::host::host().and_then(|h| h.zero_root_gpu()) else {
+                                once!(slot, srv, "no zero fallback buffer for missing root view: the draw is dropped");
                                 return false;
                             };
+                            once!(
+                                slot,
+                                srv,
+                                address = format_args!("{address:#x}"),
+                                "missing root CBV/SRV host buffer: binding 64 KiB zero fallback buffer"
+                            );
                             (gpu, true)
                         }
                     };
