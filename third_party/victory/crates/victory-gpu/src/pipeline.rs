@@ -148,6 +148,28 @@ pub(crate) struct Translated {
 
 #[cfg(windows)]
 impl Shader {
+    #[cfg(test)]
+    pub(crate) fn for_test(stage: &'static str, host: victory_shader::emit::HostShader) -> Arc<Shader> {
+        let translated = OnceLock::new();
+        let _ = translated.set(Some(Translated {
+            host,
+            threads: Some([1, 1, 1]),
+            used: Vec::new(),
+            tables: crate::draw::TablePlan::new(&[], &[]),
+            stores: false,
+            stores_by_address: false,
+            picks: std::sync::atomic::AtomicU8::new(0),
+        }));
+        Arc::new(Shader {
+            stage,
+            hash: "test000000000000".to_owned(),
+            container: Vec::new(),
+            ambient: None,
+            probe: None,
+            translated,
+        })
+    }
+
     /// The translation, made on first use; a shader that does not
     /// translate is logged once.
     pub(crate) fn translated(&self) -> Option<&Translated> {

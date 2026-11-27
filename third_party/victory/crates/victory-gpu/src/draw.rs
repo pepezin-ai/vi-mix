@@ -1819,17 +1819,18 @@ impl State {
                     if srv && slot == victory_shader::emit::SLOT_STRIDES {
                         // Ours, not the title's: the shader picks buffers
                         // from the view heap by an index it computes.
-                        match self.heap_buffers(list) {
-                            // SAFETY: an open list; the table lives as long
-                            // as the heap the list holds.
-                            Some(gpu) => unsafe {
-                                if compute {
-                                    l.SetComputeRootShaderResourceView(param, gpu);
-                                } else {
-                                    l.SetGraphicsRootShaderResourceView(param, gpu);
-                                }
-                            },
-                            None => once!("a shader picks buffers from a view heap that is not set"),
+                        let Some(gpu) = self.heap_buffers(list) else {
+                            once!("a shader picks buffers from a view heap that is not set: the draw is dropped");
+                            return false;
+                        };
+                        // SAFETY: an open list; the table lives as long
+                        // as the heap the list holds.
+                        unsafe {
+                            if compute {
+                                l.SetComputeRootShaderResourceView(param, gpu);
+                            } else {
+                                l.SetGraphicsRootShaderResourceView(param, gpu);
+                            }
                         }
                         continue;
                     }
@@ -1837,17 +1838,18 @@ impl State {
                         // Ours: the shader inspects typed view kinds for its
                         // descriptor tables only (already mirrored by `tables`),
                         // so bind the strides buffer without sweeping the heap.
-                        match self.heap_strides(list) {
-                            // SAFETY: an open list; the table lives as long
-                            // as the heap the list holds.
-                            Some(gpu) => unsafe {
-                                if compute {
-                                    l.SetComputeRootShaderResourceView(param, gpu);
-                                } else {
-                                    l.SetGraphicsRootShaderResourceView(param, gpu);
-                                }
-                            },
-                            None => once!("a shader inspects table view kinds without a view heap set"),
+                        let Some(gpu) = self.heap_strides(list) else {
+                            once!("a shader inspects table view kinds without a view heap set: the draw is dropped");
+                            return false;
+                        };
+                        // SAFETY: an open list; the table lives as long
+                        // as the heap the list holds.
+                        unsafe {
+                            if compute {
+                                l.SetComputeRootShaderResourceView(param, gpu);
+                            } else {
+                                l.SetGraphicsRootShaderResourceView(param, gpu);
+                            }
                         }
                         continue;
                     }
@@ -1855,9 +1857,29 @@ impl State {
                     let Some(&Root::View(address)) = self.roots_ref(compute).get(usize::from(slot))
                     else {
                         once!(slot, "a shader reads a root view the title did not set");
-                        // A table left unset is undefined: a null view.
-                        if tabled && !self.root_srv_table(list, None, param, compute, false) {
+                        if tabled {
+                            if !self.root_srv_table(list, None, param, compute, false) {
+                                return false;
+                            }
+                            continue;
+                        }
+                        // A root CBV or direct root SRV left unbound after
+                        // `Set*RootSignature` is undefined in D3D12 (GPU page
+                        // fault on NVIDIA): bind a persistent 64 KiB zeroed
+                        // fallback buffer, matching console null reads.
+                        let Some(gpu) = crate::host::host().and_then(|h| h.zero_root_gpu()) else {
+                            once!(slot, srv, "no zero fallback buffer for unset root view: the draw is dropped");
                             return false;
+                        };
+                        once!(slot, srv, "unset root CBV/SRV: binding 64 KiB zero fallback buffer");
+                        // SAFETY: an open list; the fallback buffer lives with `Host`.
+                        unsafe {
+                            match (compute, srv) {
+                                (false, false) => l.SetGraphicsRootConstantBufferView(param, gpu),
+                                (false, true) => l.SetGraphicsRootShaderResourceView(param, gpu),
+                                (true, false) => l.SetComputeRootConstantBufferView(param, gpu),
+                                (true, true) => l.SetComputeRootShaderResourceView(param, gpu),
+                            }
                         }
                         continue;
                     };
@@ -1873,10 +1895,23 @@ impl State {
                         }
                         continue;
                     }
-                    let Some(mut gpu) = root_view(list, address, srv) else {
-                        continue;
+                    let (mut gpu, used_fallback) = match root_view(list, address, srv) {
+                        Some(gpu) => (gpu, false),
+                        None => {
+                            let Some(gpu) = crate::host::host().and_then(|h| h.zero_root_gpu()) else {
+                                once!(slot, srv, "no zero fallback buffer for missing root view: the draw is dropped");
+                                return false;
+                            };
+                            once!(
+                                slot,
+                                srv,
+                                address = format_args!("{address:#x}"),
+                                "missing root CBV/SRV host buffer: binding 64 KiB zero fallback buffer"
+                            );
+                            (gpu, true)
+                        }
                     };
-                    if biased {
+                    if biased && !used_fallback {
                         gpu -= u64::from(self.host_word(
                             compute,
                             victory_shader::emit::USER_VIEW_BIAS,
@@ -5209,5 +5244,107 @@ mod record_hash_tests {
         // (One record of zeros is among the above.)
         let zeros: Vec<u64> = (2..100).map(|n| of(&vec![[0; 3]; n])).collect();
         assert!(zeros.iter().all(|h| seen.insert(*h)));
+    }
+}
+
+#[cfg(test)]
+mod missing_root_views_tests {
+    use victory_shader::emit::{HostShader, SLOT_STRIDES, SLOT_TABLE_STRIDES};
+    use victory_shader::native::{ComputeIo, StageIo};
+    use victory_shader::{Container, HwStage, NativeProgram};
+
+    use super::State;
+
+    fn minimal_cs_dxil() -> Vec<u8> {
+        let native = NativeProgram {
+            stage: HwStage::Cs,
+            wave64: false,
+            vgprs: 4,
+            layout: Vec::new(),
+            used: Vec::new(),
+            io: StageIo::Cs(ComputeIo {
+                rsrc2: 0,
+                threads: [1, 1, 1],
+            }),
+            code: 0xBF81_0000u32.to_le_bytes().to_vec(),
+        };
+        let mut raw_dxbc = Vec::with_capacity(32);
+        raw_dxbc.extend_from_slice(b"DXBC");
+        raw_dxbc.extend_from_slice(&[0u8; 16]);
+        raw_dxbc.extend_from_slice(&1u32.to_le_bytes());
+        raw_dxbc.extend_from_slice(&32u32.to_le_bytes());
+        raw_dxbc.extend_from_slice(&0u32.to_le_bytes());
+        let container = Container::parse(&raw_dxbc).expect("parse empty dxbc");
+        let p = victory_shader::ir::build(&native.code, false, 4).expect("ir::build");
+        let st = victory_shader::structure::structure(&p).expect("structure");
+        let res = victory_shader::resource::track(&p, &native.layout, native.stage, Some(&st))
+            .expect("track");
+        let io = victory_shader::io::raise(&p, &native).expect("io::raise");
+        victory_shader::emit::emit(&container, &native, &p, &st, &io, &res)
+            .expect("emit dxil")
+            .dxil
+    }
+
+    #[test]
+    fn bind_drops_missing_stride_tables_and_binds_zero_fallback_for_root_cbv() {
+        let Some(host) = crate::host::host() else {
+            return;
+        };
+        let gpu = host.zero_root_gpu().expect("64 KiB zero root fallback");
+        assert!(gpu != 0 && gpu.is_multiple_of(256));
+
+        let dxil = minimal_cs_dxil();
+
+        // Missing view heap for SLOT_STRIDES or SLOT_TABLE_STRIDES must drop the draw.
+        for slot in [SLOT_STRIDES, SLOT_TABLE_STRIDES] {
+            let shader = crate::pipeline::Shader::for_test(
+                "compute",
+                HostShader {
+                    stage: HwStage::Cs,
+                    dxil: dxil.clone(),
+                    user_data: Vec::new(),
+                    samplers: Vec::new(),
+                    static_samplers: Vec::new(),
+                    root_cbvs: Vec::new(),
+                    root_srvs: vec![slot],
+                    root_uavs: Vec::new(),
+                    root_indexed_views: Vec::new(),
+                },
+            );
+            let pipe = crate::pipeline::host::HostPipeline::new(&[shader], None)
+                .expect("compute pipeline with stride slot");
+            let list = host.new_list().unwrap();
+            let mut state = State::default();
+            assert!(
+                !state.bind(&list, &pipe, true),
+                "bind must return false when stride slot {slot} has no view heap"
+            );
+            list.close();
+        }
+
+        // Unset or null Root CBV binds the persistent 64 KiB zero buffer instead of
+        // leaving the root parameter uninitialized.
+        let cbv_shader = crate::pipeline::Shader::for_test(
+            "compute",
+            HostShader {
+                stage: HwStage::Cs,
+                dxil,
+                user_data: Vec::new(),
+                samplers: Vec::new(),
+                static_samplers: Vec::new(),
+                root_cbvs: vec![0],
+                root_srvs: Vec::new(),
+                root_uavs: Vec::new(),
+                root_indexed_views: Vec::new(),
+            },
+        );
+        let cbv_pipe = crate::pipeline::host::HostPipeline::new(&[cbv_shader], None)
+            .expect("compute pipeline with root CBV");
+        let list = host.new_list().unwrap();
+        let mut state = State::default();
+        assert!(state.bind(&list, &cbv_pipe, true));
+        state.set_view(true, 0, 0);
+        assert!(state.bind(&list, &cbv_pipe, true));
+        list.close();
     }
 }
