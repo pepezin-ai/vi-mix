@@ -50,28 +50,25 @@ const HEIGHT_RANGE: (u32, u32) = (360, 4320);
 /// of shared memory in use, 1,970 MB of RAM left free) and the texture queue was refused for good.
 /// The windows and buffer values are the ones measured on that card at a 5.8 fps median in the
 /// world (2026-11-26, Series X, 1080p display mode, Neptune base; Vice-Tay reads no list pool variable).
-/// `VICTORY_TEXTURE_MAX_SIZE=1024` keeps the levels of the title's textures over 1024 texels off the
-/// card (`victory-gpu` `tiles::max_size`; three quarters of a texture for each level cut), so the
-/// texture queue has room for every texture instead of being refused. It works through the
-/// `VICTORY_LEVELS_ON_DEMAND=1` of the Neptune profile (Vice-Tay's tuned set does not set it, and
-/// it no longer reads `VICTORY_TEXTURE_MAX_SIZE`: see `UNREAD_BY_VICE_TAY` in the tests).
+/// The texture queue stops at 85 % of the budget; idle texture copies are let go from there too
+/// (`victory-gpu` `host::vram_keep`, #449).
+/// The Neptune base also capped the title's textures at 1024 texels (`VICTORY_TEXTURE_MAX_SIZE`,
+/// through `VICTORY_LEVELS_ON_DEMAND=1`); the Vice-Tay base reads neither, so the preset no longer
+/// sets the cap.
 pub const LOW_VRAM: &[(&str, &str)] = &[
     ("VICTORY_CARD_WINDOWS_MB", "512"),
     ("VICTORY_CARD_BUFFERS_MB", "512"),
     ("VICTORY_TEXTURE_ROOM_PERCENT", "85"),
-    ("VICTORY_TEXTURE_MAX_SIZE", "1024"),
 ];
 
 /// The "12 GB card" preset: Fast's speed with headroom. The profile's reserves (1536 MB of windows
 /// and of buffer copies) were sized on 12 to 16 GB cards and measured on a 16 GB one; here they
-/// are 1024 MB each, and the title's textures are capped at 2048 texels (`VICTORY_TEXTURE_MAX_SIZE`,
-/// one level cut on the 4096 ones only), so the texture queue keeps room on a 12 GB card. Not
-/// measured on a 12 GB card yet.
+/// are 1024 MB each, so the texture queue keeps room on a 12 GB card. (No texture size cap: the
+/// Vice-Tay base does not read `VICTORY_TEXTURE_MAX_SIZE`.) Not measured on a 12 GB card yet.
 pub const MID_VRAM: &[(&str, &str)] = &[
     ("VICTORY_CARD_WINDOWS_MB", "1024"),
     ("VICTORY_CARD_BUFFERS_MB", "1024"),
     ("VICTORY_TEXTURE_ROOM_PERCENT", "90"),
-    ("VICTORY_TEXTURE_MAX_SIZE", "2048"),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -110,10 +107,10 @@ impl Preset {
                 "Picture first: windows and buffers read fresh each frame. About half the frame rate (measured 7 to 9 fps against 14 to 17)."
             }
             Preset::LowVram => {
-                "For 8 GB cards: textures capped at 1024 pixels and smaller reserves on the card, so every texture fits and the card stays within its budget instead of spilling into the PC's memory. Pair it with the 1920x1080 display size."
+                "For 8 GB cards: smaller reserves on the card and textures kept to 85 % of its budget, so the card stays within its budget instead of spilling into the PC's memory. Pair it with the 1920x1080 display size."
             }
             Preset::MidVram => {
-                "For 12 GB cards: Fast with headroom. Textures capped at 2048 pixels (only the largest lose a level) and 1024 MB reserves on the card, so every texture fits. Not measured on a 12 GB card yet."
+                "For 12 GB cards: Fast with headroom: 1024 MB reserves on the card. Not measured on a 12 GB card yet."
             }
         }
     }
@@ -483,8 +480,8 @@ mod tests {
                 "{name}: {low} is not below the profile"
             );
         }
-        // The size cap, and the switch it needs in the profile.
-        assert_eq!(get("VICTORY_TEXTURE_MAX_SIZE"), Some(1024));
+        // No size cap: the Vice-Tay base does not read it.
+        assert_eq!(get("VICTORY_TEXTURE_MAX_SIZE"), None);
         // The texture room is not in the tuned set any more: the preset sits below VIctory's default (90).
         assert!(get("VICTORY_TEXTURE_ROOM_PERCENT").expect("set by the preset") < 90);
         assert!(Preset::ALL.contains(&Preset::LowVram));
@@ -516,7 +513,12 @@ mod tests {
                 "{name}: {mid} is not above 8 GB"
             );
         }
-        assert_eq!(value(Preset::MidVram, "VICTORY_TEXTURE_MAX_SIZE"), 2048);
+        assert!(
+            Preset::MidVram
+                .overrides()
+                .iter()
+                .all(|(k, _)| k != "VICTORY_TEXTURE_MAX_SIZE")
+        );
         assert!(Preset::ALL.contains(&Preset::MidVram));
     }
 
@@ -545,11 +547,6 @@ mod tests {
         assert!(Keyboard::Qwertz.shoulder_keys().contains("Y C"));
     }
 
-    /// Names the launcher still offers that the Vice-Tay base does not read (checked by grep on its
-    /// crates and apps on 2026-11-26): these options do nothing on this base until its sources read
-    /// them or the options are removed.
-    const UNREAD_BY_VICE_TAY: [&str; 1] = ["VICTORY_TEXTURE_MAX_SIZE"];
-
     #[test]
     fn every_variable_an_option_names_exists_in_victorys_sources() {
         let victory = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -575,9 +572,6 @@ mod tests {
             .copied()
             .chain(preset_names.iter().map(String::as_str))
         {
-            if UNREAD_BY_VICE_TAY.contains(&name) {
-                continue;
-            }
             assert!(
                 sources.contains(&format!("\"{name}\"")),
                 "{name} is read nowhere in third_party/victory"

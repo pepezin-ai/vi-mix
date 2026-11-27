@@ -1825,14 +1825,28 @@ pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
         // (`crate::shadow::card_room_kept`) and for the render targets a
         // world makes in its first frame ([`targets_room_kept`]) counts as
         // used.
-        Some([budget, used, ..]) => {
-            used.saturating_sub(crate::pool::texture_room())
-                .saturating_add(crate::shadow::card_room_kept())
-                .saturating_add(targets_room_kept())
-                < budget / 100 * room_percent()
-        }
+        Some([budget, used, ..]) => under_share(budget, card_use(used), room_percent()),
         None => filled < WITHOUT_BUDGET,
     }
+}
+
+/// The card's memory in use as [`room`] and [`let_go_idle`] both count it:
+/// the system's count, less what our own blocks have free, with what is
+/// kept for card copies of title buffers not made yet
+/// (`crate::shadow::card_room_kept`) and for the render targets a world
+/// makes in its first frame ([`targets_room_kept`]).
+#[cfg(windows)]
+fn card_use(used: u64) -> u64 {
+    used.saturating_sub(crate::pool::texture_room())
+        .saturating_add(crate::shadow::card_room_kept())
+        .saturating_add(targets_room_kept())
+}
+
+/// Whether `used` bytes (as [`card_use`] counts them) are under `percent`
+/// of `budget`: [`room`]'s answer once past its floor, without a byte limit.
+#[cfg(any(windows, test))]
+fn under_share(budget: u64, used: u64, percent: u64) -> bool {
+    used < budget / 100 * percent
 }
 
 /// The bytes of the card's memory the texture queue leaves free for
@@ -2180,18 +2194,36 @@ pub(crate) fn let_go_idle() {
     // idle copies go after seconds, not the minutes room on the card keeps them.
     let (idle_ms, most) = match memory {
         _ if crate::residency::pressured() => (5_000, u64::MAX),
-        Some([budget, used, ..]) if keep => {
-            let used = used.saturating_sub(crate::pool::texture_room())
-                .saturating_add(crate::shadow::card_room_kept())
-                .saturating_add(targets_room_kept());
-            crate::host::vram_keep(budget, used)
-        }
+        Some([budget, used, ..]) if keep => crate::host::vram_keep(budget, card_use(used), room_percent()),
         _ => (crate::host::vram_idle_ms(memory), u64::MAX),
     };
+    let began = std::time::Instant::now();
+    let (went, bytes, first) = let_go(&textures(), idle_ms, most);
+    SWEPT_US[0].fetch_add(1, Relaxed);
+    SWEPT_US[1].fetch_add(began.elapsed().as_micros() as u64, Relaxed);
+    SWEPT_US[2].fetch_max(began.elapsed().as_micros() as u64, Relaxed);
+    if went > 0 {
+        crate::host::trail(|| {
+            format!(
+                "sweep: {went} host copies of textures the title fills let go ({} KiB), each held by its title texture alone (no list, no slot); the first: title texture {:#x}",
+                bytes >> 10,
+                first.unwrap_or(0)
+            )
+        });
+    }
+}
+
+/// [`let_go_idle`]'s look over the title textures `all` (the table, under
+/// its lock): lets go of the host copies idle for `idle_ms` and
+/// `IDLE_FRAMES` frames, the longest idle first and `most` bytes of them at
+/// most when there is a limit. How many went, their bytes and the first.
+#[cfg(windows)]
+fn let_go(all: &std::collections::BTreeSet<usize>, idle_ms: u64, most: u64) -> (u64, u64, Option<usize>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    const IDLE_FRAMES: u64 = 4;
     // For the trail (`crate::host::trail`): how many went, their bytes,
     // and the first one.
     let (mut went, mut bytes, mut first) = (0u64, 0u64, None);
-    let all = textures();
     // With a limit, the longest idle first.
     let mut by_age: Vec<(u64, usize)> = Vec::new();
     if most != u64::MAX {
@@ -2221,8 +2253,7 @@ pub(crate) fn let_go_idle() {
     };
     let from = if part == PART { FROM.load(Relaxed) } else { 0 };
     let mut looked = 0;
-    let began = std::time::Instant::now();
-    for at in sweep_batch(&all, from, part).chain(by_age.iter().map(|&(_, at)| at)) {
+    for at in sweep_batch(all, from, part).chain(by_age.iter().map(|&(_, at)| at)) {
         if bytes >= most {
             break;
         }
@@ -2267,18 +2298,7 @@ pub(crate) fn let_go_idle() {
             crate::host::retire(host);
         }
     }
-    SWEPT_US[0].fetch_add(1, Relaxed);
-    SWEPT_US[1].fetch_add(began.elapsed().as_micros() as u64, Relaxed);
-    SWEPT_US[2].fetch_max(began.elapsed().as_micros() as u64, Relaxed);
-    if went > 0 {
-        crate::host::trail(|| {
-            format!(
-                "sweep: {went} host copies of textures the title fills let go ({} KiB), each held by its title texture alone (no list, no slot); the first: title texture {:#x}",
-                bytes >> 10,
-                first.unwrap_or(0)
-            )
-        });
-    }
+    (went, bytes, first)
 }
 
 /// Since the start: looks of [`let_go_idle`], their microseconds, and the
@@ -4833,6 +4853,76 @@ float4 lit() : SV_Target { return 1.0; }
         assert_eq!(texture_floor_bytes(Some(12 * GIB)), 2 * GIB);
         assert_eq!(texture_floor_bytes(Some(24 * GIB)), 2 * GIB);
         assert_eq!(texture_floor_bytes(Some(32 * GIB)), 2 * GIB);
+    }
+
+    /// #449: wherever the texture queue is refused ([`room`] past its
+    /// floor), the sweep lets idle copies go after seconds, not after the
+    /// ten minutes it keeps them while there is room, whatever share
+    /// `VICTORY_TEXTURE_ROOM_PERCENT` gives the queue (50 to 97).
+    #[test]
+    fn a_refused_queue_never_keeps_idle_copies_for_minutes() {
+        const GIB: u64 = 1 << 30;
+        let budget = 6_823 << 20; // An RTX 5060 8 GB's (#396).
+        for room in 50..=97 {
+            for percent in 0..=110 {
+                let used = budget / 100 * percent;
+                let (idle_ms, most) = crate::host::vram_keep(budget, used, room);
+                if !under_share(budget, used, room) {
+                    assert!(idle_ms <= 5_000 && most > 0, "room {room} %, use {percent} %: ({idle_ms} ms, {most} bytes)");
+                }
+            }
+        }
+        // The default share (90) keeps its 88 % start.
+        assert_eq!(crate::host::vram_keep(100 * GIB, 87 * GIB, 90).0, 600_000);
+    }
+
+    /// #449 on a host texture: with the 8 GB preset's 85 % and the card at
+    /// 86 % of its budget (as `card_use` counts it; nothing else changes),
+    /// the queue is refused and a copy idle for over five seconds and four
+    /// frames, held by its texture alone and never submitted (its fence is
+    /// done), is let go. At 84 % it stays (ten minutes); 88 % is the
+    /// control, where it went before this change too.
+    #[cfg(windows)]
+    #[test]
+    fn an_idle_copy_goes_once_the_texture_queue_is_refused() {
+        use std::sync::atomic::Ordering::Relaxed;
+        use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc};
+        const ROOM: u64 = 85;
+        if crate::host::host().is_none() || !held_only() {
+            return;
+        }
+        let budget = 6_823u64 << 20;
+        // 256x256 BC7, nine levels.
+        let desc = [3u32, 0, 0, 0, 256, 0, 256, 0x9_0001, 98, 1, 0, 0x105, 0, 0];
+        let idle_copy = || {
+            let whole = placed_bytes(&desc).unwrap();
+            // SAFETY: memory of our own that stays.
+            let at = unsafe { VirtualAlloc(std::ptr::null(), whole as usize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) };
+            let texture = texture_at(at as u64, &desc).unwrap();
+            want_level(texture, 0);
+            drop(host_copy(texture).unwrap());
+            // Last used in frame 0, a tenth of a second in.
+            resource(texture).host.used.store(1, Relaxed);
+            texture
+        };
+        let (first, control) = (idle_copy(), idle_copy());
+        for _ in 0..4 {
+            crate::frame::test_advance();
+        }
+        while crate::host::coarse_ms() < 5_200 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let look = |percent: u64, texture: This| {
+            let used = budget / 100 * percent;
+            let (idle_ms, most) = crate::host::vram_keep(budget, used, ROOM);
+            let_go(&std::collections::BTreeSet::from([texture as usize]), idle_ms, most);
+            // (Not `made_copy`: a look at the copy counts as a use.)
+            let kept = resource(texture).host.made.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+            (under_share(budget, used, ROOM), kept)
+        };
+        assert_eq!(look(84, first), (true, true), "84 %: room, kept");
+        assert_eq!(look(86, first), (false, false), "86 %: refused, and the idle copy must go");
+        assert_eq!(look(88, control), (false, false), "88 %: refused, let go");
     }
 
     /// A placed texture viewed from a later level has a host copy of that

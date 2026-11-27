@@ -166,23 +166,37 @@ pub(crate) fn available_physical_ram() -> Option<u64> {
 /// down to 85 %. `VICTORY_TEXTURE_KEEP=0`: [`vram_idle_ms`]' older rule,
 /// all that are idle; `=1`: that rule with its two longer times.
 ///
+/// `room_percent` is the share up to which the texture queue makes new
+/// copies (`crate::resource::room`, `VICTORY_TEXTURE_ROOM_PERCENT`). Under
+/// 88 the letting go starts there, and comes down to 3 below it: from 85
+/// to 88 % the 8 GB preset's 85 refused every new texture while idle ones
+/// were kept for ten minutes (#449). The 95 % line stays.
+///
 /// (By those times everything idle for 2.5 s went from 75 % of the budget
 /// on: 61,000 of them in the first 300 s of session play-1125-0203, at 78 to
 /// 80 %, of which 13,000 were made and uploaded again.)
-pub(crate) fn vram_keep(budget: u64, used: u64) -> (u64, u64) {
+pub(crate) fn vram_keep(budget: u64, used: u64, room_percent: u64) -> (u64, u64) {
     const KEPT_MS: u64 = 600_000;
     const IDLE_MS: u64 = 5_000;
     const SHORT_MS: u64 = 1_500;
+    /// Where letting go starts when the queue's share is above it.
+    const START: u64 = 88;
+    /// How far under the start the letting go comes down to.
+    const BELOW: u64 = 3;
+    /// From here idle copies go after [`SHORT_MS`].
+    const SHORT_FROM: u64 = 95;
     if budget == 0 {
         return (IDLE_MS, u64::MAX);
     }
     let share = |percent: u64| budget / 100 * percent;
-    if used < share(88) {
+    let start = room_percent.min(START);
+    let target = start.saturating_sub(BELOW);
+    if used < share(start) {
         (KEPT_MS, u64::MAX)
-    } else if used < share(95) {
-        (IDLE_MS, used - share(85))
+    } else if used < share(SHORT_FROM) {
+        (IDLE_MS, used - share(target))
     } else {
-        (SHORT_MS, used - share(85))
+        (SHORT_MS, used - share(target))
     }
 }
 
@@ -11604,12 +11618,31 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
     fn textures_are_kept_while_the_card_has_room() {
         use super::vram_keep;
         let gib = 1 << 30;
-        assert_eq!(vram_keep(100 * gib, 87 * gib).0, 600_000);
-        // Past it: the longest idle ones, enough to come down to 85 %.
-        let (ms, bytes) = vram_keep(100 * gib, 90 * gib);
-        assert_eq!((ms, bytes), (5_000, 5 * gib));
-        assert_eq!(vram_keep(100 * gib, 120 * gib), (1_500, 35 * gib));
-        assert_eq!(vram_keep(0, 7).0, 5_000);
+        // The queue's default share (90) and any above 88: as before.
+        for room in [88, 90, 97] {
+            assert_eq!(vram_keep(100 * gib, 87 * gib, room).0, 600_000);
+            // Past it: the longest idle ones, enough to come down to 85 %.
+            let (ms, bytes) = vram_keep(100 * gib, 90 * gib, room);
+            assert_eq!((ms, bytes), (5_000, 5 * gib));
+            assert_eq!(vram_keep(100 * gib, 120 * gib, room), (1_500, 35 * gib));
+            assert_eq!(vram_keep(0, 7, room).0, 5_000);
+        }
+    }
+
+    /// #449: under 88 the letting go starts at the queue's share and comes
+    /// down to 3 below it; 95 % stays the line for the short time.
+    #[test]
+    fn textures_go_from_where_the_queue_is_refused() {
+        use super::vram_keep;
+        let gib = 1 << 30;
+        assert_eq!(vram_keep(100 * gib, 84 * gib, 85).0, 600_000);
+        assert_eq!(vram_keep(100 * gib, 85 * gib, 85), (5_000, 3 * gib));
+        assert_eq!(vram_keep(100 * gib, 87 * gib, 85), (5_000, 5 * gib));
+        assert_eq!(vram_keep(100 * gib, 94 * gib, 85), (5_000, 12 * gib));
+        assert_eq!(vram_keep(100 * gib, 95 * gib, 85), (1_500, 13 * gib));
+        // The lowest share the queue takes (50).
+        assert_eq!(vram_keep(100 * gib, 49 * gib, 50).0, 600_000);
+        assert_eq!(vram_keep(100 * gib, 50 * gib, 50), (5_000, 3 * gib));
     }
 
     #[test]
