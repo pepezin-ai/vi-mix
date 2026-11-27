@@ -2758,3 +2758,45 @@ fn v_fmac_f32_takes_the_accumulator_modifiers() {
         });
     }
 }
+
+/// `v_cmp_f_{f32,f16}` and `v_cmp_tru_{f32,f16}` are constant false/true
+/// regardless of operands (even NaNs). Lowering them as `fcmp false`/`fcmp true`
+/// causes WARP to remove the D3D12 device at dispatch; lowering them as constant
+/// lane booleans matches the integer `v_cmp_{f,t}_*` path and runs on both
+/// hardware and WARP.
+#[test]
+fn v_cmp_f_and_tru_lower_as_constant_booleans() {
+    let f = f32::to_bits;
+    let f32_inputs = [
+        [f(1.0), f(2.0), 0, 0],
+        [f(1.0), f(1.0), 0, 0],
+        [f(f32::INFINITY), f(f32::NEG_INFINITY), 0, 0],
+        [0x7FC0_0000, f(0.0), 0, 0],      // qNaN
+        [0x7F80_0001, 0x7FC0_0000, 0, 0], // sNaN, qNaN
+    ];
+    let f16_inputs = [
+        [0x3C00, 0x4000, 0, 0],
+        [0x3C00, 0x3C00, 0, 0],
+        [0x7C00, 0xFC00, 0, 0],
+        [0x7E00, 0x0000, 0, 0], // qNaN
+        [0x7C01, 0x7E00, 0, 0], // sNaN, qNaN
+    ];
+    for (op, name, want, inputs) in [
+        (0x000u16, "v_cmp_f_f32", 0u32, &f32_inputs[..]),
+        (0x00f, "v_cmp_tru_f32", 1, &f32_inputs[..]),
+        (0x0c8, "v_cmp_f_f16", 0, &f16_inputs[..]),
+        (0x0ef, "v_cmp_tru_f16", 1, &f16_inputs[..]),
+    ] {
+        // v_cmp_{f,tru}_{f32,f16}_e64 s20, v1, v2; v_cndmask_b32_e64 v0, 0, 1, s20
+        let mut body = vop3(op, 20, vgpr(1), vgpr(2), 0x80).to_vec();
+        body.extend_from_slice(&vop3(0x101, 0, 0x80, 0x81, sgpr(20)));
+        let shader = build_valu_cs(&body);
+        run_cases(&shader, inputs, |backend, i, inp, got| {
+            assert_eq!(
+                got, want,
+                "{backend}: {name}({:#010x}, {:#010x}) case {i} = {got}, want {want}",
+                inp[0], inp[1],
+            );
+        });
+    }
+}

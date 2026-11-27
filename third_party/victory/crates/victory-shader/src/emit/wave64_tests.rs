@@ -1674,6 +1674,145 @@ fn the_console_threads_of_a_two_dimensional_group_are_each_given_once() {
     eprintln!("ran on the hardware device: 64 of 64 console threads, each once");
 }
 
+/// Dwords 0..4 of each lane's 16 bytes of the UAV after `body` ran on `lanes` threads, on each
+/// host device that takes the program (the card, then WARP): `(device, words)`.
+fn per_lane_words(body: &[u32], wave64: bool, lanes: u32) -> Vec<(&'static str, Vec<u32>)> {
+    let native = native_of(body, wave64, lanes);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    let shader = lowered(&native, &p, &HashSet::new()).expect("lower");
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        let mut copy = shader.dxil.clone();
+        v.validate(&mut copy).expect("DXIL validation failed");
+    }
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ran = Vec::new();
+    for (label, warp) in [("hardware", false), ("warp", true)] {
+        let Ok(host) = Host::new(warp) else {
+            eprintln!("no SM 6.6 {label} device; not run");
+            continue;
+        };
+        let Ok((root, pso)) = host.compute_pipeline(&shader) else {
+            eprintln!("the {label} device does not take this program; not run");
+            continue;
+        };
+        let out = host
+            .dispatch(
+                &root,
+                &pso,
+                &Dispatch {
+                    roots: vec![(0, Root::Constants(vec![0; shader.user_data_dwords().max(1) as usize]))],
+                    views: &[View::RawUav(lanes * 4)],
+                    samplers: &[],
+                    groups: [1, 1, 1],
+                },
+            )
+            .unwrap_or_else(|e| panic!("{label}: dispatch failed: {e}"));
+        ran.push((label, out[0][..(lanes * 4) as usize].to_vec()));
+    }
+    ran
+}
+
+/// `v_mov_b32` of `vdst` from a DPP16 `ctrl` of `v1` (row and bank masks all set).
+fn mov_dpp16(vdst: u32, ctrl: u32, bound_ctrl: bool, fi: bool) -> [u32; 2] {
+    [
+        0x7E00_0000 | vdst << 17 | 1 << 9 | 0xFA,
+        0xFF00_0000 | u32::from(bound_ctrl) << 19 | u32::from(fi) << 18 | ctrl << 8 | 1,
+    ]
+}
+
+/// The program of the DPP inactive-lane tests: v1 = 10 * lane + 1, v4..v7 = sentinels, EXEC
+/// narrowed to the even lanes (`branch`: with an `s_cbranch_execz` past the DPP code), then
+/// - v4: quad_perm [1,0,3,2], bound_ctrl:0 fi:0 (the odd source is off: v4 stays),
+/// - v5: the same with bound_ctrl:1 (0), then `+ v1` of quad_perm [2,3,0,1] (an even, on source),
+/// - v6: the same as v4 with fi:1 (the off source is read, when `fetch`),
+/// - v7: DPP8 [1,0,3,2,5,4,7,6] fi:0 (v7 stays);
+///
+/// EXEC restored, and v4..v7 stored to 16 bytes per lane.
+fn dpp_inactive_body(wave64: bool, branch: bool, fetch: bool) -> Vec<u32> {
+    let sel: u32 = [1u32, 0, 3, 2, 5, 4, 7, 6].iter().enumerate().map(|(i, s)| s << (3 * i)).sum();
+    let mut w = vec![
+        0x1600_0000 | 1 << 17 | 0 << 9 | 0x8A, // v_mul_u32_u24 v1, 10, v0
+        0x4A00_0000 | 1 << 17 | 1 << 9 | 0x81, // v_add_nc_u32 v1, 1, v1
+    ];
+    for (v, sentinel) in [(4u32, 0xAAAAu32), (5, 0xBBBB), (6, 0xCCCC), (7, 0xDDDD)] {
+        w.extend([0x7E00_0000 | v << 17 | 1 << 9 | 0xFF, sentinel]); // v_mov_b32 v, literal
+    }
+    w.extend([
+        0x3600_0000 | 2 << 17 | 0 << 9 | 0x81,              // v_and_b32 v2, 1, v0
+        0x7C00_0000 | 0xC2 << 17 | 2 << 9 | 0x80,           // v_cmp_eq_u32 vcc, 0, v2
+        if wave64 { 0xBE8C_246A } else { 0xBE8C_3C6A },     // s_and_saveexec_b64/b32 s12, vcc
+    ]);
+    let mut dpp = Vec::new();
+    dpp.extend(mov_dpp16(4, 0xB1, false, false));
+    dpp.extend(mov_dpp16(5, 0xB1, true, false));
+    if fetch {
+        dpp.extend(mov_dpp16(6, 0xB1, false, true));
+    }
+    dpp.extend([0x7E00_0000 | 7 << 17 | 1 << 9 | 0xE9, sel << 8 | 1]); // v_mov_b32 v7, dpp8
+    dpp.extend([0x4A00_0000 | 5 << 17 | 5 << 9 | 0xFA, 0xFF00_0000 | 0x4E << 8 | 1]); // v_add_nc_u32 v5, dpp, v5
+    if branch {
+        w.push(0xBF88_0000 | dpp.len() as u32); // s_cbranch_execz past the DPP code
+    }
+    w.extend(dpp);
+    w.push(if wave64 { 0xBEFE_040C } else { 0xBEFE_030C }); // s_mov_b32/b64 exec, s12
+    w.push(0x3400_0000 | 8 << 17 | 0 << 9 | 0x84); // v_lshlrev_b32 v8, 4, v0
+    for (i, v) in [4u32, 5, 6, 7].into_iter().enumerate() {
+        // buffer_store_dword v, v8, s[8:11], 0 offen offset:4*i
+        w.extend([0xE070_1000 | 4 * i as u32, 0x8002_0000 | v << 8 | 8]);
+    }
+    w
+}
+
+/// RDNA 2 DPP, inactive source lanes (ISA 6.6; `emu/rdna2_exec_ext.py`): unless `fi:1`, a source
+/// lane that is not in EXEC gives 0 with `bound_ctrl:1` and leaves the destination as it was
+/// without it; an active source is read as ever. The upper bound for the odd (off) lanes: all
+/// their sentinels stay.
+fn dpp_inactive_expected(lanes: u32, fetch: bool) -> Vec<u32> {
+    let val = |n: u32| 10 * n + 1;
+    (0..lanes)
+        .flat_map(|n| {
+            if n % 2 == 0 {
+                [0xAAAA, val(n ^ 2), if fetch { val(n ^ 1) } else { 0xCCCC }, 0xDDDD]
+            } else {
+                [0xAAAA, 0xBBBB, 0xCCCC, 0xDDDD]
+            }
+        })
+        .collect()
+}
+
+fn check_dpp_inactive(wave64: bool, branch: bool, fetch: bool) {
+    let lanes = if wave64 { 64 } else { 32 };
+    let want = dpp_inactive_expected(lanes, fetch);
+    for (device, got) in per_lane_words(&dpp_inactive_body(wave64, branch, fetch), wave64, lanes) {
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert_eq!(
+                g, w,
+                "{device}: wave64 {wave64}, branch {branch}: lane {} dword {}: {g:#x}, the console's {w:#x}",
+                i / 4,
+                i % 4
+            );
+        }
+    }
+}
+
+#[test]
+fn dpp16_and_dpp8_keep_or_zero_the_destination_of_an_off_source_lane_in_wave32() {
+    // EXEC narrowed in place: a lane guard; fi:1 reads the off lane's VGPR too.
+    check_dpp_inactive(false, false, true);
+}
+
+#[test]
+fn dpp16_and_dpp8_keep_or_zero_the_destination_of_an_off_source_lane_past_a_branch() {
+    // Odd lanes took the branch away (no guard): a read of one of them is not defined on the
+    // host, so no fi:1 here.
+    check_dpp_inactive(false, true, false);
+}
+
+#[test]
+fn dpp16_and_dpp8_keep_or_zero_the_destination_of_an_off_source_lane_in_wave64() {
+    check_dpp_inactive(true, true, false);
+}
+
 #[test]
 fn readfirstlane_uses_both_halves_of_the_console_wave() {
     let mut words = vec![
