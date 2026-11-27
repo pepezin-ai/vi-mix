@@ -353,8 +353,18 @@ fn pool_sizes_are_the_16_core_set_from_16_logical_cpus() {
     for cpus in [7, 8, 15] {
         assert_eq!(settings::pool_sizes(cpus), None, "{cpus}");
     }
-    for cpus in [16, 24, 32] {
+    for cpus in [16, 20, 23] {
         assert_eq!(settings::pool_sizes(cpus), big, "{cpus}");
+    }
+    let huge = Some(
+        &[
+            ("VICTORY_THIN_THREADS", "12"),
+            ("VICTORY_UNDER_THREADS", "8"),
+            ("VICTORY_LAND_THREADS", "8"),
+        ][..],
+    );
+    for cpus in [24, 32] {
+        assert_eq!(settings::pool_sizes(cpus), huge, "{cpus}");
     }
 }
 

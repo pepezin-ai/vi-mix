@@ -265,8 +265,10 @@ mod tests {
         let nvidia = profile("windows-nvidia");
         let small = build_env_with_cpus(dir.path(), &nvidia, &[], None, 15).expect("env");
         assert_eq!(pools(&small), some(["8", "6", "4"]));
-        let big = build_env_with_cpus(dir.path(), &nvidia, &[], None, 24).expect("env");
+        let big = build_env_with_cpus(dir.path(), &nvidia, &[], None, 16).expect("env");
         assert_eq!(pools(&big), some(["12", "8", "6"]));
+        let huge = build_env_with_cpus(dir.path(), &nvidia, &[], None, 24).expect("env");
+        assert_eq!(pools(&huge), some(["12", "8", "8"]));
         assert_eq!(value(&big, "VICTORY_MAP_THREADS").as_deref(), Some("1"));
         // The user's options still win over the bigger pools.
         let overrides = parse_overrides("VICTORY_LAND_THREADS=5").expect("valid");

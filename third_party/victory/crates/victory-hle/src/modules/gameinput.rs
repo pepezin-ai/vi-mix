@@ -55,6 +55,9 @@ const LEFT_SHOULDER: u32 = 0x400;
 const RIGHT_SHOULDER: u32 = 0x800;
 const LEFT_STICK: u32 = 0x1000;
 const RIGHT_STICK: u32 = 0x2000;
+/// Virtual keys of the extra trigger keys (layout-independent).
+const VK_SPACE: u8 = 0x20;
+const VK_LSHIFT: u8 = 0xA0;
 
 /// Devices: host pad slots, the keyboard's stand-in pad, the keyboard.
 const PADS: usize = 4;
@@ -67,7 +70,8 @@ const HISTORY: usize = 256;
 const POLL: Duration = Duration::from_millis(8);
 
 /// The keyboard's stand-in gamepad (virtual key, button); README lists it.
-/// Sticks: W/A/S/D left, I/J/K/L right; triggers Z and C.
+/// Sticks: W/A/S/D left, I/J/K/L right; triggers Z and C, also Left Shift (left: brake, reverse)
+/// and Space (right: accelerate), where a car or a boat wants them on PC.
 const FALLBACK_BUTTONS: [(u8, u32); 14] = [
     (0x1B, MENU), // Esc
     (0x09, VIEW), // Tab
@@ -137,13 +141,15 @@ fn fallback(keys: &[KeyState], mouse: Mouse) -> PadState {
             0.0
         }
     };
+    // Space and Left Shift sit in the same place on every layout: no mapping.
+    let held = |vk: u8| if keys.iter().any(|k| k.virtual_key == vk) { 1.0 } else { 0.0 };
     PadState {
         buttons: FALLBACK_BUTTONS
             .iter()
             .filter(|(vk, _)| on(*vk) != 0.0)
             .fold(0, |all, (_, bit)| all | bit),
-        left_trigger: f32::max(on(b'Z'), f32::from(u8::from(mouse.right))),
-        right_trigger: f32::max(on(b'C'), f32::from(u8::from(mouse.left))),
+        left_trigger: f32::max(f32::max(on(b'Z'), held(VK_LSHIFT)), f32::from(u8::from(mouse.right))),
+        right_trigger: f32::max(f32::max(on(b'C'), held(VK_SPACE)), f32::from(u8::from(mouse.left))),
         left_x: on(b'D') - on(b'A'),
         left_y: on(b'W') - on(b'S'),
         right_x: (on(b'L') - on(b'J') + mouse.x).clamp(-1.0, 1.0),
@@ -1805,6 +1811,17 @@ mod tests {
         let keys = [key(b'L'), key(b'I'), key(b'Z')];
         let pad = fallback(&keys, Mouse { x: 0.75, y: -0.5, ..Default::default() });
         assert_eq!((pad.right_x, pad.right_y, pad.left_trigger), (1.0, 0.5, 1.0));
+    }
+
+    #[test]
+    fn space_accelerates_and_left_shift_brakes_like_the_triggers() {
+        let pad = fallback(&[KeyState { virtual_key: VK_SPACE, ..Default::default() }], Mouse::default());
+        assert_eq!((pad.left_trigger, pad.right_trigger), (0.0, 1.0));
+        let pad = fallback(&[KeyState { virtual_key: VK_LSHIFT, ..Default::default() }], Mouse::default());
+        assert_eq!((pad.left_trigger, pad.right_trigger), (1.0, 0.0));
+        // The old keys still pull the same triggers.
+        let pad = fallback(&[key(b'Z'), key(b'C')], Mouse::default());
+        assert_eq!((pad.left_trigger, pad.right_trigger), (1.0, 1.0));
     }
 
     #[test]

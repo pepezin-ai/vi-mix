@@ -20,7 +20,7 @@ Ce dépôt ne contient ni fichier de jeu, ni clé, ni exécutable, et n'explique
 ## Configuration requise
 
 - Windows 10 ou 11, 64 bits, avec un processeur compatible AVX2.
-- Une carte graphique Direct3D 12 avec le shader model 6.6 et les mesh shaders : GeForce RTX série 20 ou plus récente, ou Radeon RDNA 2 ou plus récente. Une carte de 12 Go manque de mémoire pour les textures ; le lanceur propose un préréglage pour les cartes de 8 et 12 Go.
+- Une carte graphique Direct3D 12 avec le shader model 6.6 et les mesh shaders : GeForce RTX série 20 ou plus récente, ou Radeon RDNA 2 ou plus récente. **Le projet est centré sur NVIDIA** : toutes les mesures et les réglages du lanceur visent les cartes NVIDIA (RTX 4070 SUPER). Les cartes AMD marchent aussi, mais moins bien (moins de fps, plus de défauts graphiques), et reçoivent moins d'attention. Une carte de 12 Go manque de mémoire pour les textures ; le lanceur propose un préréglage pour les cartes de 8 et 12 Go.
 - 32 Go de RAM conseillés, et plus de 30 Go libres sur le disque système (le cache des shaders grossit en jouant).
 - Votre propre copie du build Xbox Series 1.0.2.1 : un dossier qui contient `game_scarlett_master.exe`. Il n'est pas fourni.
 - [Rust](https://rustup.rs/) et Visual Studio 2022 ou 2026 Build Tools avec la charge de travail « Développement desktop en C++ ». VIctory est compilé depuis les sources au premier lancement.

@@ -1,4 +1,4 @@
-# AnyXboxX — Xbox Series X emulator (prototype)
+﻿# AnyXboxX — Xbox Series X emulator (prototype)
 
 [![Discord](https://img.shields.io/badge/Discord-AnyXboxX-5865F2?logo=discord&logoColor=white)](https://discord.gg/TcX42vRyPU)
 
@@ -20,7 +20,7 @@ This repository contains no game files, keys or executables, and does not explai
 ## Requirements
 
 - Windows 10 or 11, 64-bit, with an AVX2 processor.
-- A Direct3D 12 graphics card with shader model 6.6 and mesh shaders: NVIDIA RTX 20 series or newer, or AMD RDNA 2 or newer. A 12 GB card runs short of texture memory; the launcher has a preset for 8 and 12 GB cards.
+- A Direct3D 12 graphics card with shader model 6.6 and mesh shaders: NVIDIA RTX 20 series or newer, or AMD RDNA 2 or newer. **The project is focused on NVIDIA**: every measurement and the launcher's tuned settings are for NVIDIA cards (RTX 4070 SUPER). AMD cards work too, but less well (fewer fps, more graphics issues), and get less attention. A 12 GB card runs short of texture memory; the launcher has a preset for 8 and 12 GB cards.
 - 32 GB of RAM recommended, and more than 30 GB free on the system drive (the shader cache grows as you play).
 - Your own copy of the Xbox Series 1.0.2.1 build: a folder that contains `game_scarlett_master.exe`. It is not provided.
 - [Rust](https://rustup.rs/) and Visual Studio 2022 or 2026 Build Tools with the "Desktop development with C++" workload. VIctory is built from source the first time you play.

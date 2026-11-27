@@ -187,7 +187,7 @@ def test_the_default_environment_equals_the_scripts_default(tmp_path, fake_tool,
 def test_sixteen_or_more_logical_cpus_get_the_bigger_worker_pools(tmp_path, fake_tool, binary):
     done, calls = launch(tmp_path, fake_tool, binary, logical_cpus=24)
     logged = calls[1].split(" | ", 1)[1].split(";")
-    for pair in ("VICTORY_THIN_THREADS=12", "VICTORY_UNDER_THREADS=8", "VICTORY_LAND_THREADS=6"):
+    for pair in ("VICTORY_THIN_THREADS=12", "VICTORY_UNDER_THREADS=8", "VICTORY_LAND_THREADS=8"):
         assert pair in logged, (pair, done.stderr)
     user = tmp_path / "user"
     user.mkdir()
