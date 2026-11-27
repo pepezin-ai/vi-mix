@@ -61,6 +61,10 @@ pub(crate) struct Host {
     /// omits a view or sampler heap while using directly-indexed root signatures.
     fallback_view: OnceLock<Option<ID3D12DescriptorHeap>>,
     fallback_sampler: OnceLock<Option<ID3D12DescriptorHeap>>,
+    /// 64 KiB zero-filled fallback buffer bound when a root CBV or direct
+    /// root SRV is unset or points at unmapped memory, avoiding uninitialized
+    /// D3D12 root descriptors.
+    zero_root: OnceLock<Option<(ID3D12Resource, u64)>>,
 }
 
 // SAFETY: D3D12 devices, queues, fences and descriptor heaps are
@@ -1110,6 +1114,7 @@ fn create() -> windows::core::Result<Host> {
             adapter,
             fallback_view: OnceLock::new(),
             fallback_sampler: OnceLock::new(),
+            zero_root: OnceLock::new(),
         })
     }
 }
@@ -6590,6 +6595,25 @@ impl Host {
                 }
             })
             .as_ref()
+    }
+
+    /// GPU virtual address of a persistent 64 KiB zero-filled buffer for unset
+    /// or unmapped root CBVs and direct root SRVs (64 KiB covers the maximum
+    /// D3D12 constant-buffer range of 4096 float4s).
+    pub(crate) fn zero_root_gpu(&self) -> Option<u64> {
+        self.zero_root
+            .get_or_init(|| {
+                const BYTES: u64 = 64 << 10;
+                let (buffer, data) = self.upload_buffer(BYTES)?;
+                // SAFETY: freshly mapped 64 KiB upload buffer; never written again.
+                unsafe {
+                    data.write_bytes(0, BYTES as usize);
+                    let gpu = buffer.GetGPUVirtualAddress();
+                    Some((buffer, gpu))
+                }
+            })
+            .as_ref()
+            .map(|&(_, gpu)| gpu)
     }
 }
 
