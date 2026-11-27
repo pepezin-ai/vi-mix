@@ -128,23 +128,39 @@ fn integer_format(f: DXGI_FORMAT) -> bool {
 /// others keep theirs.
 fn host_blend(blend: &D3D12_BLEND_DESC, targets: &D3D12_RT_FORMAT_ARRAY) -> D3D12_BLEND_DESC {
     let count = (targets.NumRenderTargets as usize).min(8);
-    let per_target = blend.IndependentBlendEnable.as_bool();
-    let blends = |i: usize| {
-        blend.RenderTarget[if per_target { i } else { 0 }]
-            .BlendEnable
-            .as_bool()
-    };
-    if !(0..count).any(|i| integer_format(targets.RTFormats[i]) && blends(i)) {
-        return *blend;
-    }
+    let integer = |i: usize| integer_format(targets.RTFormats[i]);
     let mut host = *blend;
-    if !per_target {
-        host.IndependentBlendEnable = true.into();
-        host.RenderTarget = [blend.RenderTarget[0]; 8];
-    }
-    for i in 0..count {
-        if integer_format(targets.RTFormats[i]) {
+    if (0..count).any(integer) {
+        if !blend.IndependentBlendEnable.as_bool() {
+            let first = blend.RenderTarget[0];
+            let active = first.BlendEnable.as_bool() || first.LogicOpEnable.as_bool();
+            if active && (0..count).any(|i| !integer(i)) {
+                // One description for every target: each its own copy of slot 0, so that
+                // only the integer ones change. Slots past the targets in use do not blend.
+                host.IndependentBlendEnable = true.into();
+                for (i, target) in host.RenderTarget.iter_mut().enumerate() {
+                    if i < count {
+                        *target = first;
+                    } else {
+                        target.BlendEnable = false.into();
+                    }
+                }
+            } else if active {
+                // Every target is an integer one: switch slot 0 off, stay on one description.
+                host.RenderTarget[0].BlendEnable = false.into();
+                host.RenderTarget[0].LogicOpEnable = false.into();
+            }
+        }
+        for i in (0..count).filter(|&i| integer(i)) {
             host.RenderTarget[i].BlendEnable = false.into();
+            host.RenderTarget[i].LogicOpEnable = false.into();
+        }
+    }
+    // D3D12 rejects a PSO that has IndependentBlendEnable and LogicOpEnable on any slot,
+    // even an unused one (E_INVALIDARG, and the draws are lost).
+    if host.IndependentBlendEnable.as_bool() {
+        for target in &mut host.RenderTarget {
+            target.LogicOpEnable = false.into();
         }
     }
     host
@@ -228,10 +244,17 @@ impl GraphicsState {
                 }
                 15 => {
                     self.targets = data.cast::<D3D12_RT_FORMAT_ARRAY>().read_unaligned();
-                    for f in &mut self.targets.RTFormats {
+                    // The console's stream struct is reused: formats past NumRenderTargets can
+                    // be stale, and D3D12 rejects any that is not UNKNOWN.
+                    self.targets.NumRenderTargets = self.targets.NumRenderTargets.min(8);
+                    let count = self.targets.NumRenderTargets as usize;
+                    for f in &mut self.targets.RTFormats[..count] {
                         f.0 = crate::resource::target_format(crate::resource::pc_format(
                             f.0 as u32,
                         )) as i32;
+                    }
+                    for f in &mut self.targets.RTFormats[count..] {
+                        *f = DXGI_FORMAT_UNKNOWN;
                     }
                 }
                 16 => {
@@ -1207,6 +1230,126 @@ mod tests {
         let mut t = targets(&[DXGI_FORMAT_R8G8B8A8_UNORM]);
         t.RTFormats[1] = DXGI_FORMAT_R8_UINT;
         assert_eq!(host_blend(&blending(false), &t), blending(false));
+    }
+
+    fn logic_op(independent: bool) -> D3D12_BLEND_DESC {
+        let mut b = GraphicsState::default().blend;
+        b.IndependentBlendEnable = independent.into();
+        b.RenderTarget[0].LogicOpEnable = true.into();
+        b.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_COPY;
+        b
+    }
+
+    /// Slot 0 copied to every slot used to carry `LogicOpEnable` along with
+    /// `IndependentBlendEnable`, which D3D12 rejects (ported from PR #447).
+    #[test]
+    fn logic_op_never_stays_on_with_independent_blend() {
+        let mixed = targets(&[DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8_UINT]);
+        let mut per_target = blending(true);
+        per_target.RenderTarget[1].LogicOpEnable = true.into();
+        let mut both = blending(false);
+        both.RenderTarget[0].LogicOpEnable = true.into();
+        for (blend, t) in [
+            (logic_op(false), mixed),
+            (both, mixed),
+            (logic_op(true), targets(&[DXGI_FORMAT_R8G8B8A8_UNORM])),
+            (per_target, mixed),
+        ] {
+            let host = host_blend(&blend, &t);
+            if host.IndependentBlendEnable.as_bool() {
+                assert!(
+                    host.RenderTarget.iter().all(|r| !r.LogicOpEnable.as_bool()),
+                    "LogicOpEnable left on with IndependentBlendEnable"
+                );
+            }
+        }
+        // One integer target alone stays on one description, switched off.
+        let host = host_blend(&logic_op(false), &targets(&[DXGI_FORMAT_R8_UINT]));
+        assert!(!host.IndependentBlendEnable.as_bool());
+        assert!(!host.RenderTarget[0].LogicOpEnable.as_bool());
+        // Blending stays on for the UNORM target, off for the integer one.
+        let mut b = blending(false);
+        b.RenderTarget[0].LogicOpEnable = true.into();
+        let host = host_blend(&b, &targets(&[DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8_UINT]));
+        assert!(host.RenderTarget[0].BlendEnable.as_bool());
+        assert!(!host.RenderTarget[1].BlendEnable.as_bool());
+        assert!(!host.RenderTarget[2].BlendEnable.as_bool());
+    }
+
+    /// Formats past `NumRenderTargets` are cleared and the count is bounded
+    /// (ported from PR #447).
+    #[test]
+    fn rt_format_array_clears_stale_formats_past_num_render_targets() {
+        #[repr(C, align(8))]
+        struct Sub15(u32, D3D12_RT_FORMAT_ARRAY);
+        let mut rts = targets(&[DXGI_FORMAT_R8G8B8A8_UNORM]);
+        rts.RTFormats[1] = DXGI_FORMAT_R8_UINT;
+        rts.RTFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        let sub = Sub15(15, rts);
+        let mut g = GraphicsState::default();
+        // SAFETY: `sub` is a complete subobject 15.
+        unsafe { g.read(15, (&raw const sub).cast()) };
+        assert_eq!(g.targets.NumRenderTargets, 1);
+        assert_ne!(g.targets.RTFormats[0], DXGI_FORMAT_UNKNOWN);
+        assert!(g.targets.RTFormats[1..].iter().all(|&f| f == DXGI_FORMAT_UNKNOWN));
+        // A count past 8 is bounded, never indexing out of the array.
+        let mut rts = targets(&[DXGI_FORMAT_R8G8B8A8_UNORM]);
+        rts.NumRenderTargets = 99;
+        let sub = Sub15(15, rts);
+        // SAFETY: `sub` is a complete subobject 15.
+        unsafe { g.read(15, (&raw const sub).cast()) };
+        assert_eq!(g.targets.NumRenderTargets, 8);
+    }
+
+    /// The host really creates the pipelines the sanitising is for.
+    #[test]
+    fn logic_op_and_stale_formats_pipelines_are_accepted() {
+        let Some(host) = host() else {
+            return; // no host GPU here
+        };
+        let Some(dxc) = dxc() else {
+            eprintln!("no PC dxc.exe; skipped");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let vs = compile(&dxc, dir.path(), VS, "vs_6_5");
+        let ps = compile(&dxc, dir.path(), PS, "ps_6_5");
+        let (root, _) = root_signature(&host.device, &[], &[], false).unwrap();
+        let make = |g: &GraphicsState| {
+            let desc = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
+                // SAFETY: borrowed pointer, never released by the descriptor.
+                pRootSignature: unsafe { std::mem::transmute_copy(&root) },
+                VS: code(&vs),
+                PS: code(&ps),
+                BlendState: host_blend(&g.blend, &g.targets),
+                SampleMask: g.sample_mask,
+                RasterizerState: g.rasterizer,
+                DepthStencilState: g.depth,
+                PrimitiveTopologyType: D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+                NumRenderTargets: g.targets.NumRenderTargets,
+                RTVFormats: g.targets.RTFormats,
+                SampleDesc: g.samples,
+                ..Default::default()
+            };
+            // SAFETY: live root signature and bytecode slices.
+            unsafe { host.device.CreateGraphicsPipelineState::<ID3D12PipelineState>(&desc) }
+        };
+        let mut g = single_color_target(DXGI_FORMAT_R8G8B8A8_UNORM);
+        g.rasterizer.CullMode = D3D12_CULL_MODE_NONE;
+        g.blend = logic_op(false);
+        g.targets = targets(&[DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8_UINT]);
+        make(&g).expect("UNORM + UINT with LogicOpEnable must be accepted");
+        // Stale formats past the count, as a reused console stream leaves them.
+        #[repr(C, align(8))]
+        struct Sub15(u32, D3D12_RT_FORMAT_ARRAY);
+        let mut rts = targets(&[DXGI_FORMAT_R8G8B8A8_UNORM]);
+        rts.RTFormats[1] = DXGI_FORMAT_R8_UINT;
+        let sub = Sub15(15, rts);
+        let mut g = single_color_target(DXGI_FORMAT_R8G8B8A8_UNORM);
+        g.rasterizer.CullMode = D3D12_CULL_MODE_NONE;
+        // SAFETY: `sub` is a complete subobject 15.
+        unsafe { g.read(15, (&raw const sub).cast()) };
+        make(&g).expect("stale formats past the count must be cleared");
     }
 
     const VS: &str = "float4 main(uint i : SV_VertexID) : SV_Position {
