@@ -39,7 +39,7 @@ target_include_directories(anyxboxx_task PUBLIC "${TASK_DIR}/include" PRIVATE "$
 target_compile_definitions(anyxboxx_task PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(anyxboxx_task PRIVATE /W3 /utf-8 /permissive-)
 
-anyxboxx_dll(xgameruntime xgameruntime/xgameruntime.cpp xgameruntime/served_interfaces.cpp
+anyxboxx_dll(xgameruntime_cpp xgameruntime/xgameruntime.cpp xgameruntime/served_interfaces.cpp
              xgameruntime/task_queue_interface.cpp xgameruntime/user_interface.cpp
              xgameruntime/system_interface.cpp xgameruntime/game_config.cpp
              xgameruntime/registry.cpp xgameruntime/save_store.cpp xgameruntime/save_interface.cpp
@@ -48,13 +48,16 @@ anyxboxx_dll(xgameruntime xgameruntime/xgameruntime.cpp xgameruntime/served_inte
              xgameruntime/platform_interface.cpp xgameruntime/gamer_picture.cpp
              xgameruntime/store_interface.cpp
              xgameruntime/xgameruntime.def)
-target_link_libraries(xgameruntime PRIVATE anyxboxx_task dxgi ole32 iphlpapi)
+# Keep the oracle's DLL name (including its PE export directory) in a separate folder.
+set_target_properties(xgameruntime_cpp PROPERTIES OUTPUT_NAME xgameruntime
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/oracle/$<0:>")
+target_link_libraries(xgameruntime_cpp PRIVATE anyxboxx_task dxgi ole32 iphlpapi)
 
 # DLL du runtime portÃ©es en Rust (crates/anyxboxx-*, docs/rust-full-status.md) : compilÃ©es par
 # cargo, copiÃ©es ici Ã  cÃ´tÃ© des DLL C++. Â« source=nom dans bin Â», sÃ©parÃ©es par des virgules.
 set(ANYXBOXX_RUST_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/../target/release" CACHE PATH
     "Dossier de cargo build --release (les DLL Rust du runtime)")
-set(ANYXBOXX_RUST_DLLS "xcrdapi.dll=XCRDAPI.dll,kernelx.dll=kernelx.dll,d3d12_xs.dll=d3d12_xs.dll,anyxboxx_tls.dll=anyxboxx_tls.dll,xmem.dll=xmem.dll,anyxboxx-native-launcher.exe=anyxboxx.exe,anyxboxx_gpu_run.exe=anyxboxx_gpu_run.exe")
+set(ANYXBOXX_RUST_DLLS "xgameruntime.dll=xgameruntime.dll,xcrdapi.dll=XCRDAPI.dll,kernelx.dll=kernelx.dll,d3d12_xs.dll=d3d12_xs.dll,anyxboxx_tls.dll=anyxboxx_tls.dll,xmem.dll=xmem.dll,anyxboxx-native-launcher.exe=anyxboxx.exe,anyxboxx_gpu_run.exe=anyxboxx_gpu_run.exe")
 add_custom_target(rust_dlls ALL
   COMMAND ${CMAKE_COMMAND} -DRUST_RELEASE=${ANYXBOXX_RUST_RELEASE} -DBIN=${CMAKE_BINARY_DIR}/bin
           -DDLLS=${ANYXBOXX_RUST_DLLS} -P ${CMAKE_CURRENT_SOURCE_DIR}/rust_dlls.cmake

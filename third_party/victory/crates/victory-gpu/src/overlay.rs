@@ -517,7 +517,17 @@ pub(crate) fn render(stats: &Stats, frame_h: usize) -> Option<Bitmap> {
     let (pad, gap) = (px(12.0), px(10.0));
     let pct = |p: f64| format!("{p:.0}%");
     let rate = |r: f64| if r < 10.0 { format!("{r:.1} fps") } else { format!("{r:.0} fps") };
-    let figures: Vec<(&'static str, String)> = vec![
+    // With frame generation on: the frames the title really drew and the frames shown.
+    let mut figures: Vec<(&'static str, String)> = Vec::new();
+    if crate::fg::active() {
+        let per = crate::fg::shown_per_frame();
+        figures.push(("Real fps", rate(stats.fps)));
+        figures.push((
+            "Frame gen",
+            if per > 1 { format!("{per}x  \u{b7}  {}", rate(stats.fps * f64::from(per))) } else { "off (no constants or not focused)".into() },
+        ));
+    }
+    figures.extend([
         ("30 s high", stats.half_minute.map_or("...".into(), |(high, _, _)| rate(high))),
         ("30 s low", stats.half_minute.map_or("...".into(), |(_, low, _)| rate(low))),
         ("30 s avg", stats.half_minute.map_or("...".into(), |(_, _, mean)| format!("{mean:.1} fps"))),
@@ -526,7 +536,7 @@ pub(crate) fn render(stats: &Stats, frame_h: usize) -> Option<Bitmap> {
         ("GPU", stats.gpu.map_or("n/a".into(), pct)),
         ("RAM", format!("{:.1} GB  \u{b7}  {:.1} / {:.0} GB", stats.ram.0, stats.ram.1, stats.ram.2)),
         ("VRAM", stats.vram.map_or("n/a".into(), |(u, b)| format!("{u:.1} / {b:.1} GB"))),
-    ];
+    ]);
     let items = body_items(stats, figures);
     let hardware = [
         short_cpu(&stats.cpu_name),

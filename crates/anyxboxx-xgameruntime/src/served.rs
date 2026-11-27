@@ -3,7 +3,7 @@
 //! One object per C++ object name (`TaskQueueInterface`, `UserInterface`…): it answers every
 //! (provider, interface) pair the table gives it. The task queue is VIctory's object (`xasync`,
 //! the same provider and methods); the others are built here, with their method tables sized from
-//! the largest slot the GDK table gives their pairs, and their methods still to be written.
+//! the largest slot the GDK table gives their pairs. Unimplemented slots use the common refusal.
 
 use std::collections::BTreeMap;
 use std::ffi::c_void;

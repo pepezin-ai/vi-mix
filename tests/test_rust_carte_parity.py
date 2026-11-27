@@ -11,10 +11,10 @@ import sys
 
 import pytest
 
-from emu import status_map
+from emu import status_map, translation
 from pe_builder import Asm, build_pe
 from test_rust_traduction_parity import (
-    SCARLETT, environment, gpu_coverage_table, make, require_binary, write_registry)
+    REPO, SCARLETT, environment, gpu_coverage_table, make, require_binary, write_registry)
 
 CODE = Asm().mov_eax(1).ret().build()
 
@@ -140,6 +140,25 @@ def test_rust_reads_the_gdk_tables_like_python(binary, registry, gpu_table, tmp_
                                "--gpu-coverage", gpu_table)
     assert ok, err
     assert svg.read_text(encoding="utf-8") == python
+
+
+def test_current_inventory_needs_no_cpp_sources(binary, registry, gpu_table, tmp_path):
+    repo = tmp_path / "repo"
+    source = repo / "runtime" / "xgameruntime"
+    source.mkdir(parents=True)
+    for name in ("gdk_api_table.inc", "served_interfaces.inc", "unsupported.txt"):
+        (source / name).write_bytes((REPO / "runtime" / "xgameruntime" / name).read_bytes())
+    names = translation.not_implemented_functions(source)
+    assert "XPackageUninstallChunks" in names and "XTaskQueueRegisterWaiter" not in names
+    expected = translation.gdk_runtime_area(source / "gdk_api_table.inc", source / "served_interfaces.inc", source)
+    assert expected == translation.gdk_runtime_area()
+    folders = make(tmp_path)
+    options = ("--emulated-list", registry, "--gpu-coverage", gpu_table)
+    original = rust_map(binary, folders, tmp_path / "default.svg", *options)
+    copied = rust_map(binary, folders, tmp_path / "copied.svg", *options, "--repo", repo)
+    assert original[0] and copied[0], (original[3], copied[3])
+    assert copied[1:3] == original[1:3]
+    assert f"{expected.done}/{expected.total}".encode() in copied[2]
 
 
 def test_missing_gdk_tables_are_refused(binary, tmp_path):

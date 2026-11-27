@@ -123,6 +123,76 @@ pub(crate) fn floor() -> u64 {
     *BYTES.get_or_init(|| parse_floor(std::env::var("VICTORY_LEVELS_MIN_KB").ok().as_deref()))
 }
 
+/// The texture size cap, `VICTORY_TEXTURE_MAX_SIZE=<texels>` (256 at the
+/// least; unset or 0: none). With it, the host copy of a texture the title
+/// places in memory and fills whose level 0 is wider or taller than the cap
+/// does not keep the levels above it: the card's memory of them, three
+/// quarters of such a texture for each level cut, is not taken. The title
+/// still sees its texture as it described it (size, levels, layout, its
+/// memory); the host's views start at the first level within the cap, so a
+/// shader that samples it gets that level, sharp to the cap.
+/// - With the held levels (`resource.rs` `held_only`, the default), the
+///   host copy begins at that level (`resource.rs` `cap_base`).
+/// - With levels on demand (`VICTORY_LEVELS_ON_DEMAND=1`), the levels above
+///   it are never held (`texture.rs` `held_levels`) and get no tiles.
+///
+/// With the held levels, a texture the card copies into or out of, or
+/// resolves, keeps every level (`resource.rs` `keep_whole`): those name
+/// levels by number. (A texture made level by level keeps its numbers
+/// either way; only its views hide the levels over the cap.)
+/// For cards whose memory cannot hold the title's textures at full size
+/// (the launcher's 8 GB and 12 GB presets). After the Neptune base's
+/// `tiles::max_size` (AnyXboxX 9e878913).
+pub(crate) fn max_size() -> Option<u32> {
+    #[cfg(test)]
+    if let Some(cap) = TEST_MAX_SIZE.with(std::cell::Cell::get) {
+        return (cap != 0).then_some(cap);
+    }
+    static CAP: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        let cap = parse_max_size(std::env::var("VICTORY_TEXTURE_MAX_SIZE").ok().as_deref());
+        if let Some(cap) = cap {
+            tracing::info!(
+                cap,
+                levels_on_demand = wanted(),
+                "texture levels above the size cap are not kept on the card (VICTORY_TEXTURE_MAX_SIZE)"
+            );
+        }
+        cap
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own cap for [`max_size`] on its thread (`Some(0)`: none).
+    pub(crate) static TEST_MAX_SIZE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+fn parse_max_size(value: Option<&str>) -> Option<u32> {
+    value
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&cap| cap > 0)
+        .map(|cap| cap.max(256))
+}
+
+/// The first level of a `width` x `height` texture of `levels` levels that
+/// fits within `cap` on both sides (0 when level 0 does; the last level at
+/// most).
+pub(crate) fn first_within(width: u64, height: u64, levels: u32, cap: u32) -> u32 {
+    let cap = u64::from(cap);
+    let mut level = 0;
+    while level + 1 < levels && ((width >> level).max(1) > cap || (height >> level).max(1) > cap) {
+        level += 1;
+    }
+    level
+}
+
+/// Whether a texture of `width` x `height` texels has a level 0 over the
+/// size cap.
+pub(crate) fn over_cap(width: u64, height: u64) -> bool {
+    max_size().is_some_and(|cap| width > u64::from(cap) || height > u64::from(cap))
+}
+
 /// The bytes of the tiles given to textures now: the card's memory they
 /// hold (`resource.rs` `room` counts it with the other host copies).
 pub(crate) fn given_total() -> u64 {
@@ -1492,6 +1562,28 @@ void look() {
         assert_eq!(parse_floor(Some("2048")), 2048 << 10);
         assert_eq!(parse_floor(Some(&(1u64 << 54).to_string())), u64::MAX);
         assert_eq!(parse_floor(Some(&u64::MAX.to_string())), u64::MAX);
+    }
+
+    /// The size cap's parsing and the first level within it (after the
+    /// Neptune base's tests, AnyXboxX 9e878913).
+    #[test]
+    fn the_size_cap_is_read_and_cuts_the_levels_above_it() {
+        assert_eq!(parse_max_size(None), None);
+        assert_eq!(parse_max_size(Some("0")), None);
+        assert_eq!(parse_max_size(Some("nope")), None);
+        assert_eq!(parse_max_size(Some(" 1024 ")), Some(1024));
+        assert_eq!(parse_max_size(Some("64")), Some(256));
+        assert_eq!(first_within(4096, 4096, 13, 1024), 2);
+        assert_eq!(first_within(2048, 1024, 12, 1024), 1);
+        assert_eq!(first_within(1024, 1024, 11, 1024), 0);
+        assert_eq!(first_within(4096, 64, 13, 2048), 1);
+        // Never past the last level.
+        assert_eq!(first_within(4096, 4096, 2, 256), 1);
+        TEST_MAX_SIZE.with(|cap| cap.set(Some(2048)));
+        assert!(over_cap(4096, 16) && !over_cap(2048, 2048));
+        TEST_MAX_SIZE.with(|cap| cap.set(Some(0)));
+        assert!(!over_cap(8192, 8192));
+        TEST_MAX_SIZE.with(|cap| cap.set(None));
     }
 
     #[test]

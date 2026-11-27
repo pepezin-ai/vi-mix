@@ -1,7 +1,7 @@
-//! GDK runtime functions written by AnyXboxX, read from the C++ runtime's sources like
+//! GDK runtime coverage read from the shared inventory, like
 //! `emu/translation.py` (`gdk_runtime_area`) and `emu/status_map.py` (`gdk_blocks`) do:
 //! `gdk_api_table.inc` lists every X* function, `served_interfaces.inc` the interfaces AnyXboxX
-//! serves, and the `.cpp` tables mark the methods still wired to `ANYXBOXX_NOT_IMPLEMENTED`.
+//! serves, and `unsupported.txt` lists refused methods, including explicit uninstall refusals.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -79,8 +79,13 @@ pub fn read(sources: &GdkSources) -> std::io::Result<GdkRuntime> {
     })
 }
 
-/// `translation.not_implemented_functions`: X* functions the `.cpp` tables wire to the stub.
+/// Current runtime refusals, or the C++ table comments for an older repository.
 fn not_implemented_functions(folder: &Path) -> std::io::Result<BTreeSet<String>> {
+    match std::fs::read_to_string(folder.join("unsupported.txt")) {
+        Ok(text) => return Ok(text.lines().map(String::from).collect()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
     let mut names = BTreeSet::new();
     let Ok(entries) = std::fs::read_dir(folder) else {
         return Ok(names); // Path.glob on a missing folder finds nothing

@@ -165,6 +165,7 @@ It is off while the builder runs.
 
 ## Where to look
 
+- [Synthetic RT benchmark](rt-benchmark.md) for repeatable node-test timing on a hardware adapter or WARP.
 - `crates/victory-shader/src/bvh.rs`: the reference for the node test.
 - `crates/victory-shader/src/emit/lower.rs`: the lowering of the two
   instructions and of memory by address (`Lower::memory`).

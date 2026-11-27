@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::{RunArgs, RunError, settings};
+use super::{Console, RunArgs, RunError, settings};
 
 pub const GAME_EXE: &str = "game_scarlett_master.exe";
 /// The game's two DLLs warmed with its shaders by `--precompile`.
@@ -97,13 +97,19 @@ impl Victory {
         Ok(command)
     }
 
-    /// `victory run <game> --execute` with the game's environment.
+    /// `victory run <game> --execute` with the game's environment, as a Series X.
     pub fn game_command(&self, game_dir: &Path, env: &Env) -> Command {
+        self.game_command_as(game_dir, env, Console::SeriesX)
+    }
+
+    /// `victory run <game> --execute`, then the arguments of `console` (none for Series X).
+    pub fn game_command_as(&self, game_dir: &Path, env: &Env, console: Console) -> Command {
         let mut command = Command::new(&self.exe);
         command
             .arg("run")
             .arg(game_dir.join(GAME_EXE))
-            .arg("--execute");
+            .arg("--execute")
+            .args(console.victory_args());
         apply_env(&mut command, env);
         command
     }

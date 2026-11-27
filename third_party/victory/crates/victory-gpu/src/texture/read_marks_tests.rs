@@ -197,3 +197,55 @@ fn placed_textures_found_again_are_the_tables() {
         "the read waited for the placed textures' table"
     );
 }
+
+/// The size cap lifted between two reads of a texture in one list (a copy
+/// by the card, `keep_whole`): the capped host copy's staging buffer, and
+/// the first level a read finds staged, go with that copy, so the list's
+/// next read stages and uploads the whole copy instead of taking the
+/// capped one's staged level as its own. A staging buffer a thread makes
+/// for the capped copy after the swap (it took the copy before) is not
+/// kept as the texture's either.
+#[test]
+fn a_texture_uncapped_after_a_read_stages_its_whole_copy() {
+    let Some(host) = crate::host::host() else {
+        return; // no host GPU here
+    };
+    if !crate::resource::held_only() {
+        return;
+    }
+    // 4096x4096 BC7 with every level, as the title places it.
+    let desc = [3u32, 0, 0, 0, 4096, 0, 4096, 13 << 16 | 1, 98, 1, 0, 0x105, 0, 0];
+    let bytes = crate::resource::placed_bytes(&desc).unwrap() as usize;
+    crate::tiles::TEST_MAX_SIZE.with(|cap| cap.set(Some(1024)));
+    let t = crate::resource::texture_at(title_memory(bytes), &desc).unwrap();
+    let list = host.new_list().unwrap();
+    super::upload_from(&list, t, 0);
+    let capped = crate::resource::host_copy(t).unwrap();
+    assert_eq!(capped.base, 2, "capped at the 1024 level");
+    assert_eq!(crate::resource::staged_first(t), 2, "the capped copy holds the levels from 2");
+    assert_eq!(super::staged_from(t), 2);
+    crate::resource::keep_whole(t);
+    assert_eq!(crate::resource::staged_first(t), u32::MAX, "the swap let the capped copy's staging go");
+    assert_eq!(super::staged_from(t), u32::MAX);
+    // A thread that took the capped copy before the swap stages it after.
+    assert!(super::staging(t, &capped, 0).is_some());
+    assert_eq!(crate::resource::staged_first(t), u32::MAX, "not the texture's staging");
+    assert_eq!(super::staged_from(t), u32::MAX);
+    // The same list reads it again from level 2: not taken as staged.
+    super::upload_from(&list, t, 2);
+    let whole = crate::resource::host_copy(t).unwrap();
+    assert_eq!(whole.base, 0, "the whole copy");
+    assert_ne!(whole.serial, capped.serial);
+    assert_eq!(crate::resource::staged_first(t), 2);
+    let serial = super::STAGING.lock().unwrap().as_ref().and_then(|m| m.get(&(t as usize)).map(|s| s.serial));
+    assert_eq!(serial, Some(whole.serial), "staged from the whole copy");
+    // Another list reads it from level 0: every level of the whole copy.
+    let next = host.new_list().unwrap();
+    super::upload_from(&next, t, 0);
+    assert_eq!(crate::resource::staged_first(t), 0);
+    assert_eq!(super::staged_from(t), 0);
+    crate::tiles::TEST_MAX_SIZE.with(|cap| cap.set(None));
+    list.close();
+    next.close();
+    // (A placed texture stays in the table, as the title's memory does.)
+}

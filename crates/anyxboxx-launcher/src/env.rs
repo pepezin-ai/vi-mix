@@ -102,6 +102,8 @@ pub fn build_env_with_cpus(
         xg_dll: xg.map(|x| x.dll.clone()),
         xg_mode: xg.map_or(XgMode::Real, |x| x.mode),
         batch_card_rehash: false,
+        // The console only changes the `victory run` command line, not the environment.
+        console: anyxboxx::run::Console::SeriesX,
         victory_exe: None,
         repo: None,
     })?;

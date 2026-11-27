@@ -10,6 +10,8 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+#[cfg(windows)]
+mod waiters;
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::c_void;
@@ -17,7 +19,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 
-use super::xgameruntime::{Guid, HRESULT, Interface, Methods, Object, S_OK, add_ref, missing};
+#[cfg(not(windows))]
+use super::xgameruntime::missing;
+use super::xgameruntime::{Guid, HRESULT, Interface, Methods, Object, S_OK, add_ref};
 
 /// The task-queue provider; it is also the interface id titles ask for.
 pub const PROVIDER: Guid = Guid {
@@ -66,28 +70,46 @@ impl Mode {
 }
 
 /// A title callback and its context (addresses, so tasks can cross threads).
-#[derive(Clone, Copy)]
-struct Task {
-    context: usize,
-    callback: usize,
+enum Task {
+    Callback {
+        context: usize,
+        callback: Callback,
+        terminated: Arc<AtomicBool>,
+    },
+    #[cfg(windows)]
+    Wait(Arc<waiters::Waiter>),
 }
 
 impl Task {
-    fn new(context: *mut c_void, callback: Callback) -> Task {
-        Task {
-            context: context as usize,
-            callback: callback as usize,
+    fn canceled_by(&self, queue: &Arc<Queue>) -> bool {
+        match self {
+            Self::Callback { terminated, .. } => Arc::ptr_eq(terminated, &queue.terminated),
+            #[cfg(windows)]
+            Self::Wait(waiter) => waiter.belongs_to(queue),
         }
     }
 
     fn run(self, canceled: bool) {
-        // SAFETY: built from a `Callback` in `new`.
-        let callback: Callback = unsafe { std::mem::transmute(self.callback) };
-        callback(self.context as *mut c_void, canceled);
+        match self {
+            Self::Callback {
+                context,
+                callback,
+                terminated,
+            } => {
+                callback(
+                    context as *mut c_void,
+                    canceled || terminated.load(Ordering::Acquire),
+                );
+            }
+            #[cfg(windows)]
+            Self::Wait(waiter) => waiter.dispatch(canceled),
+        }
     }
 }
 
 struct Port {
+    #[cfg(windows)]
+    waiter_count: AtomicUsize,
     mode: Mode,
     tasks: Mutex<VecDeque<Task>>,
     ready: Condvar,
@@ -96,6 +118,8 @@ struct Port {
 impl Port {
     fn new(mode: Mode) -> Arc<Port> {
         let port = Arc::new(Port {
+            #[cfg(windows)]
+            waiter_count: AtomicUsize::new(0),
             mode,
             tasks: Mutex::default(),
             ready: Condvar::new(),
@@ -194,9 +218,11 @@ impl Pool {
 /// A queue handle is `Arc::into_raw` of this; duplicating and closing a
 /// handle add and drop a reference.
 pub struct Queue {
+    #[cfg(windows)]
+    waiters: Mutex<HashMap<u64, waiters::Registration>>,
     ports: [Arc<Port>; 2],
     monitors: Mutex<Vec<(u64, usize, usize)>>,
-    terminated: AtomicBool,
+    terminated: Arc<AtomicBool>,
     /// Delayed callbacks still waiting out their delay, in submission
     /// order: terminating the queue cancels them with the queued ones.
     delayed: Mutex<BTreeMap<u64, Task>>,
@@ -205,14 +231,22 @@ pub struct Queue {
 impl Queue {
     fn new(ports: [Arc<Port>; 2]) -> Arc<Queue> {
         Arc::new(Queue {
+            #[cfg(windows)]
+            waiters: Mutex::default(),
             ports,
             monitors: Mutex::default(),
-            terminated: AtomicBool::new(false),
+            terminated: Arc::new(AtomicBool::new(false)),
             delayed: Mutex::default(),
         })
     }
 
-    fn submit(self: &Arc<Self>, port: u32, delay_ms: u32, task: Task) -> HRESULT {
+    fn submit(
+        self: &Arc<Self>,
+        port: u32,
+        delay_ms: u32,
+        context: *mut c_void,
+        callback: Callback,
+    ) -> HRESULT {
         static NEXT_DELAYED: AtomicU64 = AtomicU64::new(0);
         if port > COMPLETION {
             return E_INVALIDARG;
@@ -220,6 +254,12 @@ impl Queue {
         if self.terminated.load(Ordering::Acquire) {
             return E_ABORT;
         }
+        // Composites share a port, but only the submitting queue can cancel this entry.
+        let task = Task::Callback {
+            context: context as usize,
+            callback,
+            terminated: Arc::clone(&self.terminated),
+        };
         if delay_ms == 0 {
             self.deliver(port, task);
             return S_OK;
@@ -384,7 +424,7 @@ pub fn XTaskQueueSubmitDelayedCallback(
     callback: Option<Callback>,
 ) -> HRESULT {
     match (queue(handle), callback) {
-        (Some(queue), Some(callback)) => queue.submit(port, delay_ms, Task::new(context, callback)),
+        (Some(queue), Some(callback)) => queue.submit(port, delay_ms, context, callback),
         _ => E_INVALIDARG,
     }
 }
@@ -401,8 +441,15 @@ pub fn XTaskQueueTerminate(
         return E_INVALIDARG;
     };
     queue.terminated.store(true, Ordering::Release);
+    #[cfg(windows)]
+    waiters::terminate(&queue);
     for port in &queue.ports {
-        let pending: Vec<Task> = lock(&port.tasks).drain(..).collect();
+        let pending: VecDeque<Task> = {
+            let mut tasks = lock(&port.tasks);
+            let (pending, shared) = tasks.drain(..).partition(|task| task.canceled_by(&queue));
+            *tasks = shared;
+            pending
+        };
         // Dispatches waiting on this queue end: nothing more will come.
         // (Those of other queues on the port see theirs is open and wait
         // on.) After the lock above, so none misses both flag and wake.
@@ -658,7 +705,7 @@ pub fn XAsyncSchedule(block: *mut AsyncBlock, delay_ms: u32) -> HRESULT {
         return E_INVALIDARG;
     };
     let context = Box::into_raw(Box::new(Work { call, block }));
-    let hr = queue.submit(WORK, delay_ms, Task::new(context.cast(), work));
+    let hr = queue.submit(WORK, delay_ms, context.cast(), work);
     if hr < 0 {
         // Refused, so the task never runs.
         // SAFETY: still ours.
@@ -728,10 +775,9 @@ fn complete_call(call: &Arc<Call>, block: *mut AsyncBlock, result: HRESULT, requ
     };
     call.finished.notify_all();
     if published && routine.is_some() {
-        let task = Task::new(block.cast(), complete);
         match queue(handle) {
-            Some(queue) if queue.submit(COMPLETION, 0, task) == S_OK => {}
-            _ => task.run(true),
+            Some(queue) if queue.submit(COMPLETION, 0, block.cast(), complete) == S_OK => {}
+            _ => complete(block.cast(), true),
         }
     }
 }
@@ -1138,7 +1184,17 @@ extern "system" fn m_set_process_queue(_: This, q: *const Queue) {
 }
 /// The runtime's debug check that the caller is not a time-critical thread,
 /// which every runtime call in a title makes first.
-extern "system" fn m_check_thread(_: This) {}
+extern "system" fn m_check_thread(_: This) {
+    if TIME_SENSITIVE.with(Cell::get)
+        && std::env::var_os("ANYXBOXX_TRACE").as_deref() == Some(std::ffi::OsStr::new("1"))
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "[runtime] appel bloquant depuis un thread sensible au temps"
+        );
+    }
+}
 
 // XThread: the time-sensitivity mark is per thread (the C++ runtime keeps it in a thread_local).
 const E_FAIL: HRESULT = 0x8000_4005_u32 as i32;
@@ -1167,29 +1223,63 @@ extern "system" fn m_is_time_sensitive(_: This) -> bool {
     TIME_SENSITIVE.with(Cell::get)
 }
 
+extern "system" fn query_interface(this: This, iid: *const Guid, out: *mut This) -> HRESULT {
+    const IUNKNOWN: Guid = Guid::new(0, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
+    if out.is_null() {
+        return 0x8000_4003_u32 as i32;
+    }
+    // SAFETY: the title supplies a readable IID and a writable object pointer.
+    unsafe {
+        if matches!(iid.as_ref(), Some(&IUNKNOWN | &PROVIDER)) {
+            out.write(this);
+            S_OK
+        } else {
+            out.write(std::ptr::null());
+            0x8000_4002_u32 as i32
+        }
+    }
+}
+
+extern "system" fn reserved_slot(_: This) -> HRESULT {
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "[runtime] XTaskQueue slot 8 -> E_NOTIMPL"
+    );
+    E_NOTIMPL
+}
+
+#[cfg(windows)]
+const WAIT_METHODS: Methods<2> = Methods([
+    waiters::register as *const (),
+    waiters::unregister as *const (),
+]);
+#[cfg(not(windows))]
+const WAIT_METHODS: Methods<2> = Methods([missing::<20> as *const (), missing::<21> as *const ()]);
+
 static VTABLE: Methods<31> = Methods([
-    missing::<0> as *const (),         // 0x00 QueryInterface
-    add_ref as *const (),              // 0x08 AddRef
-    add_ref as *const (),              // 0x10 Release: the object is static
-    m_get_status as *const (),         // 0x18
-    m_get_result_size as *const (),    // 0x20
-    m_cancel as *const (),             // 0x28
-    m_run as *const (),                // 0x30
-    m_begin as *const (),              // 0x38
-    missing::<8> as *const (),         // 0x40
-    m_schedule as *const (),           // 0x48
-    m_complete as *const (),           // 0x50
-    m_get_result as *const (),         // 0x58
-    m_create as *const (),             // 0x60
-    m_create_composite as *const (),   // 0x68
-    m_get_port as *const (),           // 0x70
-    m_duplicate as *const (),          // 0x78
-    m_dispatch as *const (),           // 0x80
-    m_close as *const (),              // 0x88
-    m_submit as *const (),             // 0x90
-    m_submit_delayed as *const (),     // 0x98
-    missing::<20> as *const (),        // 0xa0 register a wait handle
-    missing::<21> as *const (),        // 0xa8 unregister it
+    query_interface as *const (),    // 0x00 QueryInterface
+    add_ref as *const (),            // 0x08 AddRef
+    add_ref as *const (),            // 0x10 Release: the object is static
+    m_get_status as *const (),       // 0x18
+    m_get_result_size as *const (),  // 0x20
+    m_cancel as *const (),           // 0x28
+    m_run as *const (),              // 0x30
+    m_begin as *const (),            // 0x38
+    reserved_slot as *const (),      // 0x40
+    m_schedule as *const (),         // 0x48
+    m_complete as *const (),         // 0x50
+    m_get_result as *const (),       // 0x58
+    m_create as *const (),           // 0x60
+    m_create_composite as *const (), // 0x68
+    m_get_port as *const (),         // 0x70
+    m_duplicate as *const (),        // 0x78
+    m_dispatch as *const (),         // 0x80
+    m_close as *const (),            // 0x88
+    m_submit as *const (),           // 0x90
+    m_submit_delayed as *const (),   // 0x98
+    WAIT_METHODS.0[0],
+    WAIT_METHODS.0[1],
     m_terminate as *const (),          // 0xb0
     m_register_monitor as *const (),   // 0xb8
     m_unregister_monitor as *const (), // 0xc0

@@ -22,6 +22,8 @@ use crate::native::{
 use crate::resource::BvhNodes;
 use crate::{ShaderError, io, ir, resource, structure};
 
+mod bench;
+
 /// Threads of one group, each with its own record.
 const THREADS: u32 = 32;
 /// Bytes of a thread's record: the node pointer (two dwords), the ray's
@@ -52,7 +54,18 @@ const WHOLE: Descriptor = Descriptor::Numbers(0, bvh::BOX_SORT);
 /// the instruction's result in v13-v16 (under a lane mask of the threads
 /// whose record says so), stored to the UAV at 16 bytes a thread.
 fn program(wide: bool, descriptor: Descriptor) -> Vec<u32> {
-    let mut w = vec![
+    ray_program(wide, descriptor, false)
+}
+
+fn ray_program(wide: bool, descriptor: Descriptor, global_rays: bool) -> Vec<u32> {
+    let mut w = Vec::new();
+    if global_rays {
+        w.extend([
+            0x8F15_8505, // s_lshl_b32 s21, s5, 5 (group id x * 32)
+            0x4A00_0015, // v_add_nc_u32 v0, s21, v0 (global ray index)
+        ]);
+    }
+    w.extend([
         0xBE85_0380, // s_mov_b32 s5, 0
         0xF408_0202,
         0xFA00_0000, // s_load_dwordx4 s[8:11], s[4:5], 0x0
@@ -67,7 +80,11 @@ fn program(wide: bool, descriptor: Descriptor) -> Vec<u32> {
         0x8002_0914, // buffer_load_dwordx4 v[9:12], v20, s[8:11], 0 offen offset:32
         0xE030_1030,
         0x8002_1114, // buffer_load_dword v17, v20, s[8:11], 0 offen offset:48
-    ];
+    ]);
+    if global_rays {
+        // The same PSO, input records and dispatch with only the RT switch changed.
+        w.push(0x3622_2200); // v_and_b32 v17, s0, v17
+    }
     for k in 0..4u32 {
         // v_mov_b32 v13+k, 1+k
         w.push(0x7E00_0200 | (13 + k) << 17 | (0x81 + k));
@@ -457,19 +474,22 @@ fn buffer(scene: &Scene, batch: &[Case], base: u64) -> Vec<u32> {
     let mut data = vec![0u32; (NODES / 4) as usize];
     for (t, case) in batch.iter().enumerate() {
         let Some((n, kind, ray)) = case else { continue };
-        let r = &mut data[t * (RECORD / 4) as usize..][..13];
         let pointer = (base >> 3) + u64::from(scene.pointer(*n, *kind));
-        (r[0], r[1]) = (pointer as u32, (pointer >> 32) as u32);
-        r[2] = ray.extent.to_bits();
-        for a in 0..3 {
-            r[3 + a] = ray.origin[a].to_bits();
-            r[6 + a] = ray.direction[a].to_bits();
-            r[9 + a] = ray.inverse[a].to_bits();
-        }
-        r[12] = 1;
+        ray_record(&mut data[t * (RECORD / 4) as usize..], pointer, ray);
     }
     data.extend(&scene.words);
     data
+}
+
+fn ray_record(r: &mut [u32], pointer: u64, ray: &Ray) {
+    (r[0], r[1]) = (pointer as u32, (pointer >> 32) as u32);
+    r[2] = ray.extent.to_bits();
+    for a in 0..3 {
+        r[3 + a] = ray.origin[a].to_bits();
+        r[6 + a] = ray.direction[a].to_bits();
+        r[9 + a] = ray.inverse[a].to_bits();
+    }
+    r[12] = 1;
 }
 
 fn expected(scene: &Scene, case: &Case, sort: bool) -> [u32; 4] {

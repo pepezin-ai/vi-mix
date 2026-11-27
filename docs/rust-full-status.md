@@ -17,7 +17,7 @@ git submodule update --init
 cargo build --release --workspace
 
 # Command line (replaced tools\lancer_victory.ps1: same options, same environment):
-.\target\release\anyxboxx.exe run --game-dir "C:\Users\ANAKIN\Downloads\GTA6.Xbox.v1.0.2.1-CYBERLEEK" --xg-dll "C:\Users\ANAKIN\Downloads\GTA6.Xbox.v1.0.2.1-CYBERLEEK\dll\xg_xs.dll" --precompile
+.\target\release\anyxboxx.exe run --game-dir "C:\path\to\your\game" --xg-dll "C:\path\to\your\game\dll\xg_xs.dll" --precompile
 
 # Graphical launcher (double-click target\release\anyxboxx-launcher.exe, or):
 .\target\release\anyxboxx-launcher.exe
@@ -91,7 +91,7 @@ Profiles (`crates/anyxboxx-launcher/profiles.toml`, one test each):
 | `runtime/d3d12_xs` | `crates/anyxboxx-d3d12-xs` | `test_d3d12_virtual_memory.py`, `test_runtime_cpp.py`, identical export table | **deleted** |
 | `runtime/tls` (`anyxboxx_tls.dll`) | `crates/anyxboxx-tls`, a `no_std` cdylib | `test_native_tls.py`, `test_native_tls_callbacks.py`, identical export table | **deleted** |
 | `runtime/xmem` | `crates/anyxboxx-xmem` (ERA attributes shared with VIctory's xmem module) | `test_xmem_era.py`, `test_xmem_virtual.py`, `test_runtime_cpp.py`, identical export table | **deleted** |
-| `runtime/xgameruntime` | `crates/anyxboxx-xgameruntime` (task queue = VIctory’s `xasync`) | 89 requested pytest cases passed against the Rust DLL, including the restored DLL export and runtime parity checks (Windows, 2026-11-26) | XPackage identity, enumeration, locale, installation monitors, mounts and availability are ported. Chunk and UWP uninstall return logged `E_NOTIMPL`; package uninstall logs and returns `false`. The C++ DLL remains as an oracle. |
+| `runtime/xgameruntime` | `crates/anyxboxx-xgameruntime` and VIctory `xasync` | 17 PE exports and 26 provider/interface pairs checked against C++ | Native runtime ships the Rust DLL. Inventory and commands below. |
 | `runtime/launcher` | `crates/anyxboxx-native-launcher` | `tests/test_rust_native_launcher_parity.py` runs the synthetic native launcher suite against both implementations | kept as `anyxboxx_cpp.exe` for parity; TomBox-dependent cases require its DLLs |
 | Graphical launcher | `crates/anyxboxx-launcher` (new) | 190 Rust tests | |
 
@@ -99,12 +99,70 @@ How the Rust runtime DLLs and native launcher reach the runtime folder: `cargo b
 
 TLS carrier finding: as a `no_std` cdylib, its TLS block holds exactly the carrier (262,208 bytes, no Rust std thread-locals). The game's template therefore shares it as with the C++ DLL. `no_std` needs `panic = "abort"`, which Cargo only accepts for the whole release profile, so the root workspace's release profile now aborts on panic.
 
-**Still C++:**
+### Windows x64 xgameruntime inventory
 
-- `runtime/xgameruntime`: retained as the C++ parity oracle. XPackage is ported with the explicit uninstall refusals above; the C++ DLL is still built.
-- `runtime/launcher`: retained as the `anyxboxx_cpp.exe` parity oracle.
-- `runtime/gpu_runner`: retained as the `anyxboxx_gpu_run_cpp.exe` parity oracle; the GPU runner itself is `crates/anyxboxx-gpu-run` (`anyxboxx_gpu_run.exe`).
-- `runtime/third_party/libhttpclient-task`: goes with xgameruntime.
+The native launcher loads `runtime/build/bin/xgameruntime.dll`, byte-identical to the Cargo artifact. The `xgameruntime_cpp` target builds the oracle in `runtime/build/oracle/xgameruntime.dll`. The measured PE tables match by ordinal and name. Both contain zero forwarders.
+
+| Ordinal | Export |
+| ---: | --- |
+| 1 | `AnyXboxX_CreateDXGIFactory` |
+| 2 | `AnyXboxX_CreateDXGIFactory1` |
+| 3 | `AnyXboxX_CreateDXGIFactory2` |
+| 4 | `AnyXboxX_NormalizeHdrLuminance` |
+| 5 | `AnyXboxX_RegCloseKey` |
+| 6 | `AnyXboxX_RegOpenKeyExW` |
+| 7 | `AnyXboxX_RegOpenKeyW` |
+| 8 | `AnyXboxX_RegQueryValueExW` |
+| 9 | `InitializeApiImpl` |
+| 10 | `InitializeApiImplEx` |
+| 11 | `InitializeApiImplEx2` |
+| 12 | `QueryApiImpl` |
+| 13 | `UninitializeApiImpl` |
+| 14 | `XErrorReport` |
+| 15 | `XGameRuntimeInitialize` |
+| 16 | `XGameRuntimeUninitialize` |
+| 17 | `XSystemGetDeviceType` |
+
+The GDK table names 396 functions. Of these, 262 belong to the 26 pairs served by `QueryApiImpl` in local mode. Aliases share 19 objects. The table lists the 210 slots wired to specific C++ handlers after the three IUnknown methods. Some handlers return errors. The other slots in those tables use the generic refusal. The two `.inc` files give the GUIDs and method names. Of the 262 mapped functions on these objects, 52 use the generic refusal and 12 have explicit offline or uninstall refusals. The reports count the other 198 functions (198/396 overall).
+
+| Object (without the `Interface` suffix) | C++ slots |
+| --- | --- |
+| TaskQueue | 3–7, 9–30 |
+| User | 3–14, 16–38, 42–49 |
+| Gamertag, Analytics, Feature | 3 |
+| System | 3–8 |
+| Game, Display, Error | 3–5 |
+| Invite, Activation, Protocol | 3–4 |
+| PendingInvite | 5–6 |
+| HdrDisplay | 4 |
+| Networking | 15–17 |
+| GameSave | 3–32 |
+| LocalStorage | 3–8 |
+| Package | 3–19, 22, 24–26, 30, 32–34, 37–41 |
+| Store | 3–16, 19–21, 28–29, 49–54, 58–64, 66–67, 71–78, 82–83 |
+
+`test_rust_xgameruntime_parity.py` compares the two DLLs directly in separate processes. It calls the initializers and all three DXGI factories and checks aliases, IUnknown results, stub placement, all four profile pictures, the bytes of an accented gamertag and callbacks from a Windows event. The Rust queue now handles wait registration at slots 20 and 21, rearming and removal. It preserves waits owned by another queue sharing the port. Slot 0 answers IUnknown and the queue IID. Slot 29 traces a blocking call on a time-sensitive thread.
+
+`test_rust_dlls.py` runs the same scenarios on each DLL, including synthetic PE startup, registry, tasks, users, persistent saves, packages, events, offline Store, HDR, connectivity and DXGI redirection. For XPackage, C++ returns `S_OK` for chunk uninstall without removing chunks. Rust logs `E_NOTIMPL`. Both return `E_NOTIMPL` for UWP and `false` for package uninstall. Rust logs all three with tracing disabled. Unsupported Xbox Live and Store methods retain their offline limitations.
+
+Rust uses VIctory’s `xasync` queue. The tests cover the scenarios named here. Full Microsoft Task scheduling, including callback order and thread affinity during concurrent termination, remains implementation-specific. The Rust config reader accepts multiline attributes and retains its overflow check on version components.
+
+**Building and retaining the oracles**
+
+The first three build commands below produce and stage the Rust runtime. The `rust_dlls` target suffices for distribution. The following CMake command builds the three test oracles. C++ still needs the MIT Task module and `runtime/common`. Rust embeds `gdk_api_table.inc` and `served_interfaces.inc`. The Python and Rust reports read those tables and `unsupported.txt`. A parity test checks that inventory against both DLLs. Only reports on older checkouts without the inventory fall back to C++ comments. The C++ source files and the MIT Task implementation remain inputs to the oracle build. Distribution needs only the staged Rust runtime binaries from `bin`. The C++ `launcher` and `gpu_runner` directories supply the comparison executables for launcher and GPU tests.
+
+Signatures checked offline in the locally installed GDK 261000 headers, including `XTaskQueue.h`, `XThread.h`, `XUser.h` and `XPackage.h`. [Microsoft GDK public reference](https://learn.microsoft.com/gaming/gdk/)
+
+```powershell
+$env:CARGO_BUILD_JOBS = "4"
+$env:CARGO_TARGET_DIR = Join-Path $PWD "target-codex"
+cargo build --offline --release --workspace
+cmake -S runtime -B runtime/build -A x64 "-DANYXBOXX_RUST_RELEASE=$env:CARGO_TARGET_DIR/release"
+cmake --build runtime/build --config Release --target rust_dlls
+cmake --build runtime/build --config Release --target xgameruntime_cpp anyxboxx_cpp anyxboxx_gpu_run_cpp
+$env:ANYXBOXX_REQUIRE_RUNTIME = "1"
+python -m pytest -q tests/test_rust_dlls.py tests/test_rust_xgameruntime_parity.py
+```
 
 **Still Python:**
 
@@ -128,7 +186,7 @@ python -m pytest tests/test_rdna2_ref_parity.py → 38 passed of 38 (packed f16 
 
 On 2026-11-26, `cargo build --release --workspace`, `cargo test --release --workspace`, crate Clippy with `-D warnings`, `cargo fmt --check`, and the documented Ruff check passed. CMake built `runtime/build-ninja` with Ninja. The 89-case pytest run used the Rust xgameruntime in a mixed runtime; `tests/test_rust_dlls.py` also compared its exports against the C++ DLL. No game was run.
 
-The `rdna2-ref`, 1251 pytest and 198 workspace figures above are from the earlier measure; the workspace and xgameruntime checks were rerun as noted.
+On 2026-11-27, the release workspace passed 566 Cargo tests. All 1,969 pytest cases passed with the runtime required, the three C++ oracles built and the GPU tests using WARP. The launcher tests used their synthetic recorder under the filename `axg-recorder.exe`. No game or VIctory executable ran. The documented Ruff check, 17 VIctory xasync unit tests and `cargo xtask policy` also passed.
 
 The runtime was built from this branch (cargo, then CMake). With `ANYXBOXX_REQUIRE_RUNTIME=1`, the TomBox DLL tests also need `python tools/build_tombox.py`.
 
@@ -147,3 +205,4 @@ The runtime was built from this branch (cargo, then CMake). With `ANYXBOXX_REQUI
 - Python-side model bug (not fixed here, worth an issue): the VOP3 forms of `v_madmk_f32`, `v_madak_f32`, `v_fmamk_f32` and `v_fmaak_f32` (VOP3 opcodes 0x120, 0x121, 0x12C, 0x12D) without a literal operand raise `TypeError` in `emu/rdna2_exec_vop3.py` (the missing literal K reaches the operation as `None`) instead of being refused or run. The Rust reads K as 0. Neither result is a refusal, so the parity tests leave these forms out; found by the encoding sweep above.
 - Python-side model bug (not fixed here, worth an issue): `emu/rdna2_exec_wide.py` `_fma` computes `float(Fraction(a) * Fraction(b) + Fraction(c))` for finite operands, and `float()` raises `OverflowError` when the exact result exceeds the double range, instead of returning ±infinity as IEEE fma does. The Rust port returns ±infinity, so the generic fuzz leaves `v_fma_f64` out and a dedicated test covers it with operands that cannot overflow.
 - Rust-side port bug, fixed: `v_mac_f32`, `v_madmk_f32` and `v_madak_f32` in `crates/anyxboxx-rdna2-ref/src/vector.rs` computed `a * b + c` as a plain expression, so the compiler chose which NaN came out, and it swapped the operands of the addition: with a NaN factor and a NaN addend, the Rust returned the addend's NaN where the Python model (`_mul_add`, x86-64 arithmetic) returns the factor's (for example `v_madak_f32` with S1 = `0x7FC00B0B` and K = `0x7FC00C0C`: Rust `0x7FC00C0C`, Python `0x7FC00B0B`). `float::mul_add` now writes the model's order out: the first NaN factor, or the NaN the product makes (∞ × 0), before a NaN addend. `v_mad_f32` uses it too; it gave the model's NaN in this build, but only by the compiler's choice. Like the other NaN rules of the port, this follows the model's host arithmetic, not a measured RDNA 2 result. Found by running the parity generator on 60,000 more seeds (Linux, 2026-11-27): five programs ended with a different NaN in a register, the three traced all at a `v_madak_f32` with a NaN K; with this change the same 60,000 programs end with the same values in both models.
+- Python-side model inconsistency, fixed: the VOP3 form of `v_cndmask_b32` read its lane mask (S2) inside the loop over active lanes (`emu/rdna2_exec_vop3.py`), so with EXEC = 0 a mask operand the model refuses (a VGPR, a reserved code) was never read and the instruction ran, while the Rust port reads the mask once and refused it. The Python now reads it once before the lanes, like its other VOP3 checks and the Rust; nothing changes for a readable mask. Found by the parity generator: in 120,000 more seeds on 2026-11-27 it was the only difference left between the two models apart from the register groups past v255 (#437). (A sweep of every opcode also shows the half-precision instructions still being ported, #503 and #505; the generator does not draw those yet.)

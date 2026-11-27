@@ -114,6 +114,25 @@ unsafe extern "system" fn change_install_order(
     S_OK
 }
 
+unsafe extern "system" fn uninstall_chunks(
+    _this: *mut c_void,
+    _id: *const c_char,
+    _count: u32,
+    _selectors: *mut c_void,
+) -> HResult {
+    crate::log::write(format_args!(
+        "[runtime] XPackageUninstallChunks -> E_NOTIMPL"
+    ));
+    crate::object::E_NOTIMPL
+}
+
+unsafe extern "system" fn uninstall_uwp(_this: *mut c_void, _name: *const c_char) -> HResult {
+    crate::log::write(format_args!(
+        "[runtime] XPackageUninstallUWPInstance -> E_NOTIMPL"
+    ));
+    crate::object::E_NOTIMPL
+}
+
 unsafe extern "system" fn uninstall_package(_this: *mut c_void, _id: *const c_char) -> bool {
     crate::log::write(format_args!(
         "[runtime] XPackageUninstallPackage: not implemented"
@@ -192,6 +211,7 @@ pub fn methods() -> Vec<(usize, *const c_void)> {
         (16, crate::package_monitor::install_async as *const c_void),
         (17, crate::package_monitor::install_result as *const c_void),
         (18, estimate_download as *const c_void),
+        (19, uninstall_chunks as *const c_void),
         (
             22,
             crate::package_monitor::unregister_package as *const c_void,
@@ -200,6 +220,7 @@ pub fn methods() -> Vec<(usize, *const c_void)> {
         (25, crate::package_mount::path as *const c_void),
         (26, crate::package_mount::close as *const c_void),
         (30, write_stats as *const c_void),
+        (32, uninstall_uwp as *const c_void),
         (33, enumerate_features as *const c_void),
         (34, uninstall_package as *const c_void),
         (37, crate::package_mount::mount_async as *const c_void),

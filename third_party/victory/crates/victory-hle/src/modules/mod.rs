@@ -16,6 +16,8 @@ pub mod display;
 pub mod dsp;
 #[cfg(windows)]
 pub mod dstorage;
+// (vt-dlss) The title's `ffxDispatch`, watched for DLSS frame generation's inputs.
+pub mod ffx;
 #[cfg(windows)]
 pub mod files;
 pub mod gameinput;

@@ -20,6 +20,8 @@ use crate::resource::PAGEABLE_IIDS;
 
 #[cfg(windows)]
 pub(crate) mod thin;
+#[cfg(all(test, windows))]
+mod replacement_tests;
 
 const ALLOCATOR_IIDS: [Iid; 4] = [
     guid(
@@ -383,7 +385,7 @@ pub(crate) fn cut_list(this: This) -> bool {
 pub(crate) type Parts = Vec<(Vec<ValueWait>, Vec<Detached>, Vec<usize>)>;
 
 /// Takes the host sides of the submitted `lists`, part by part ([`cut`]),
-/// and leaves each list a new, closed host list for its next reset, as
+/// and leaves each list a fresh host list for its next reset, as
 /// [`detach`] does. What comes back is in the order the queue runs it: a
 /// new entry starts at every part that has waits; host lists without
 /// waits join the entry before them. The list's upload memory and draw
@@ -414,12 +416,10 @@ pub(crate) fn detach_parts(lists: &[This]) -> Parts {
             }
             continue;
         }
-        let Some(fresh) = fresh_list() else {
+        let Some(mut fresh) = fresh_list() else {
             continue;
         };
-        // A new host list is open; the title's next call on its list is a
-        // reset, which wants it closed.
-        fresh.close();
+        fresh.prepare_replacement();
         // SAFETY: one of our lists, closed and submitted: nothing records
         // into it until the title resets it.
         let list = unsafe { &mut *this.cast_mut().cast::<List>() };
@@ -472,7 +472,7 @@ pub(crate) fn detach_parts(lists: &[This]) -> Parts {
 }
 
 /// Takes the host sides of submitted lists (each once, however often the
-/// submission names it) and leaves each list a new, closed host list for
+/// submission names it) and leaves each list a fresh host list for
 /// its next reset: what was taken, and which of them run in what order.
 #[cfg(windows)]
 pub(crate) fn detach(lists: &[This]) -> (Vec<Detached>, Vec<usize>) {
@@ -486,12 +486,10 @@ pub(crate) fn detach(lists: &[This]) -> (Vec<Detached>, Vec<usize>) {
             order.push(i);
             continue;
         }
-        let Some(fresh) = fresh_list() else {
+        let Some(mut fresh) = fresh_list() else {
             continue;
         };
-        // A new host list is open; the title's next call on its list is a
-        // reset, which wants it closed.
-        fresh.close();
+        fresh.prepare_replacement();
         let list = this.cast_mut().cast::<List>();
         // SAFETY: one of our lists, closed and submitted: nothing records
         // into it until the title resets it.
@@ -885,10 +883,23 @@ extern "system" fn barrier(this: This, count: u32, barriers: *const Barrier) -> 
 /// Moves a title texture's host copy to `state` in the list, if needed.
 #[cfg(windows)]
 pub(crate) fn ensure_state(list: &crate::host::HostList, resource: This, state: u32) {
+    // One host texture for the whole move (the texture's copy may be let
+    // go meanwhile; this list then holds it).
+    if let Some(copy) = crate::resource::host_copy(resource) {
+        ensure_held_state(list, &copy, state);
+    }
+}
+
+/// [`ensure_state`] of a host copy the caller holds.
+#[cfg(windows)]
+pub(crate) fn ensure_held_state(
+    list: &crate::host::HostList,
+    copy: &std::sync::Arc<crate::resource::HostTexture>,
+    state: u32,
+) {
     use windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_STATES as State;
-    if let Some((texture, before)) = list.transition(resource, state) {
-        let state = crate::host::legal_state(texture, state);
-        let barrier = crate::host::transition(texture, State(before as i32), State(state as i32));
+    if let Some((before, state)) = list.transition_held(copy, state) {
+        let barrier = crate::host::transition(&copy.texture, State(before as i32), State(state as i32));
         // SAFETY: an open list and a live texture (the list's states hold
         // it).
         unsafe { list.list.barriers(&[barrier]) };
@@ -973,6 +984,10 @@ extern "system" fn copy_resource(this: This, dst: This, src: This) {
         let Some(list) = host_list(this) else {
             return;
         };
+        // (Every level of both, before their host copies are asked for:
+        // `crate::resource::keep_whole`.)
+        crate::resource::keep_whole(dst);
+        crate::resource::keep_whole(src);
         if let (Some(to), Some(from)) = (
             crate::resource::host_resource(dst),
             crate::resource::host_resource(src),
@@ -1071,6 +1086,10 @@ extern "system" fn copy_texture_region(
         else {
             return;
         };
+        // Subresources are named by level: every level of both textures
+        // (`crate::resource::keep_whole`; buffers are left alone).
+        crate::resource::keep_whole(dst.resource);
+        crate::resource::keep_whole(src.resource);
         let Some(to) = crate::resource::host_resource(dst.resource) else {
             // Texture to buffer: a read back. The list copies the texels
             // into a host buffer of ours; once it has run they go to the
@@ -1343,6 +1362,12 @@ extern "system" fn resolve(
 ) {
     #[cfg(windows)]
     if let Some(list) = host_list(this)
+        && {
+            // (Every level of both: `crate::resource::keep_whole`.)
+            crate::resource::keep_whole(dst);
+            crate::resource::keep_whole(src);
+            true
+        }
         && let (Some(to), Some(from)) = (
             crate::resource::host_resource(dst),
             crate::resource::host_resource(src),

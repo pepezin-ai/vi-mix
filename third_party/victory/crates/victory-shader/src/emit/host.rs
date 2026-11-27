@@ -13,6 +13,9 @@ use super::HostShader;
 use super::container::SigElement;
 use crate::dxbc::{Container, FourCC};
 
+#[cfg(test)]
+pub(super) mod timed;
+
 pub struct Host {
     pub device: ID3D12Device,
 }

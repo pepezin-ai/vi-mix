@@ -265,10 +265,13 @@ def execute(wave, name, opcode, word, literal):
         from emu.rdna2_exec import Untranslated
         raise Untranslated(f"{name} en VOP3 sans littéral")
     destination = wave.v[fields.vdst]
+    # v_cndmask_b32's lane mask (S2) is read once, before the lanes: an operand the model refuses is
+    # refused whatever EXEC holds, as the checks above are (and as the Rust port does).
+    select = wave.read_mask(fields.sources[2], literal) if name == "v_cndmask_b32" else 0
     for lane in wave.active():
         a, b, c = _inputs(wave, fields, lane, literal, float_inputs(name))
         if is_vop1 or is_vop2:
-            condition = wave.read_mask(fields.sources[2], literal) >> lane & 1 if name == "v_cndmask_b32" else 0
+            condition = select >> lane & 1
             result = VECTOR[name](a, b if is_vop2 else 0, destination[lane], literal, condition)
         else:
             result = VECTOR3[name](a, b, c)

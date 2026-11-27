@@ -706,7 +706,7 @@ impl<'a> Tracer<'a> {
         let Some([a, b]) = self
             .sop2(v, &["s_add_u32", "s_add_i32"])
             .map(|(_, t)| t)
-            .or_else(|| self.vadd(v))
+            .or_else(|| self.vadd(v, false))
         else {
             return dynamic;
         };
@@ -737,7 +737,7 @@ impl<'a> Tracer<'a> {
             if x == v {
                 continue;
             }
-            let pc = self.code_base(x, 4)?;
+            let pc = self.code_base(x, 4, false)?;
             base = base.or(Some(pc));
         }
         base
@@ -766,14 +766,15 @@ impl<'a> Tracer<'a> {
 
     /// The `s_getpc_b64` low dword among the terms `v` adds up (`depth`
     /// additions deep; joins are not followed).
-    fn code_base(&self, v: Value, depth: u32) -> Option<Value> {
+    /// Include clamped terms only to identify a code base for a diagnostic.
+    fn code_base(&self, v: Value, depth: u32, trace_through_clamp: bool) -> Option<Value> {
         if self.getpc(v).is_some() {
             return Some(v);
         }
         // Computed in VGPRs and taken from the first lane.
         if let Some(lane) = self.first_lane(v) {
             return match self.vorigin(lane) {
-                Term::Value(x) => self.code_base(x, depth),
+                Term::Value(x) => self.code_base(x, depth, trace_through_clamp),
                 Term::Const(_) => None,
             };
         }
@@ -783,9 +784,9 @@ impl<'a> Tracer<'a> {
         let terms = self
             .sop2(v, &["s_add_u32", "s_add_i32"])
             .map(|(_, t)| t)
-            .or_else(|| self.vadd(v))?;
+            .or_else(|| self.vadd(v, trace_through_clamp))?;
         terms.into_iter().find_map(|t| match t {
-            Term::Value(x) => self.code_base(x, depth - 1),
+            Term::Value(x) => self.code_base(x, depth - 1, trace_through_clamp),
             Term::Const(_) => None,
         })
     }
@@ -830,7 +831,7 @@ impl<'a> Tracer<'a> {
 
     /// The operands of a VALU addition (`v_add_co_u32`, `v_add_nc_u32`)
     /// writing `v`, through VGPR copies of scalars.
-    fn vadd(&self, v: Value) -> Option<[Term; 2]> {
+    fn vadd(&self, v: Value, trace_through_clamp: bool) -> Option<[Term; 2]> {
         let inst = self.def(v)?;
         let Fields::Valu(f) = &inst.fields else {
             return None;
@@ -843,6 +844,7 @@ impl<'a> Tracer<'a> {
             })) != Some(v)
             || f.abs != 0
             || f.neg != 0
+            || (f.clamp && !trace_through_clamp)
             || f.sdwa.is_some()
             || f.dpp.is_some()
         {
@@ -1070,10 +1072,10 @@ impl<'a> Tracer<'a> {
         if self.inputs[v.0 as usize].is_some() {
             return "an address in an SGPR that is no root parameter";
         }
-        if self
-            .leaves(v)
-            .any(|l| self.def(l).is_some_and(|i| i.name() == "s_getpc_b64"))
-        {
+        if self.leaves(v).any(|l| {
+            self.def(l).is_some_and(|i| i.name() == "s_getpc_b64")
+                || self.code_base(l, 4, true).is_some()
+        }) {
             return "an address relative to the program counter";
         }
         match self.def(v).map(|i| i.name()) {
@@ -2832,28 +2834,46 @@ pub(crate) mod tests {
     /// through and the lane's index is the computed term. (A first-lane read
     /// of an index alone stays the computed term itself; see
     /// `the_console_waterfall_over_a_first_lane_offset_is_one`.)
+    fn first_lane_code_table_load(clamp: bool) -> Result<Resources, ShaderError> {
+        let words = [
+            0xBE82_1F00, // 0x00: s_getpc_b64 s[2:3]
+            0xD70F_0457 | (u32::from(clamp) << 15),
+            0x0000_054A, // v_add_co_u32 v87, s4, v74, s2
+            0xD528_0458,
+            0x0010_0680, // v_add_co_ci_u32 v88, s4, 0, s3, s4
+            0x7E0C_0557, // v_readfirstlane_b32 s6, v87
+            0x7E0E_0558, // v_readfirstlane_b32 s7, v88
+            0xF400_0203,
+            0xFA00_0000, // s_load_dword s8, s[6:7], 0x0
+            S_ENDPGM,
+        ];
+        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let p = crate::ir::build(&code, false, 256).unwrap();
+        track(&p, &[], HwStage::Cs, lanes(&p).as_ref())
+    }
+
     #[test]
     fn a_code_table_address_taken_from_the_first_lane() {
-        let r = track_words(
-            &[
-                0xBE82_1F00, // 0x00: s_getpc_b64 s[2:3]
-                0xD70F_0457,
-                0x0000_054A, // v_add_co_u32 v87, s4, v74, s2
-                0xD528_0458,
-                0x0010_0680, // v_add_co_ci_u32 v88, s4, 0, s3, s4
-                0x7E0C_0557, // v_readfirstlane_b32 s6, v87
-                0x7E0E_0558, // v_readfirstlane_b32 s7, v88
-                0xF400_0203,
-                0xFA00_0000, // s_load_dword s8, s[6:7], 0x0
-                S_ENDPGM,
-            ],
-            &[],
-            HwStage::Cs,
-        );
+        let r = first_lane_code_table_load(false).unwrap();
         assert_eq!(r.scalar.len(), 1);
         let a = r.scalar[0].1;
         assert_eq!((a.param, a.offset), (CODE, 4));
         assert!(a.dynamic.is_some(), "the lane's index is the computed term");
+    }
+
+    #[test]
+    fn clamped_u32_add_does_not_trace_a_code_table_address() {
+        let err = first_lane_code_table_load(true).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ShaderError::Unsupported {
+                    what: "an address relative to the program counter",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]

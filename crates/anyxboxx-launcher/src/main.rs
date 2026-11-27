@@ -36,6 +36,7 @@ mod picker;
 mod processes;
 mod profile;
 mod progress;
+mod renderer;
 mod session;
 mod setup;
 mod shade;
@@ -66,6 +67,7 @@ fn main() -> eframe::Result {
             .with_title("AnyXboxX launcher")
             .with_inner_size([1180.0, 780.0])
             .with_min_inner_size([860.0, 560.0]),
+        wgpu_options: renderer::wgpu_options(host::detect_host()),
         ..eframe::NativeOptions::default()
     };
     eframe::run_native(

@@ -194,6 +194,44 @@ fn powershell_names_are_accepted() {
 }
 
 #[test]
+fn the_title_runs_as_a_series_x_unless_series_s_is_asked() {
+    let victory = Victory::prebuilt(&std::env::current_exe().unwrap()).unwrap();
+    let args_of = |command: Command| -> Vec<OsString> {
+        command.get_args().map(|a| a.to_os_string()).collect()
+    };
+    let game = PathBuf::from("G");
+    let expected_head = [
+        OsString::from("run"),
+        game.join(GAME_EXE).into_os_string(),
+        OsString::from("--execute"),
+    ];
+    // The default asks nothing more of VIctory: the command is the one the launcher has always run.
+    let default = parse(&["--game-dir", "G"]);
+    assert_eq!(default.console, Console::SeriesX);
+    let command = victory.game_command_as(&game, &Env::new(), default.console);
+    assert_eq!(args_of(command), expected_head);
+    assert_eq!(
+        args_of(victory.game_command(&game, &Env::new())),
+        expected_head
+    );
+    // Series S passes VIctory's own flag after --execute; the PowerShell-style name is accepted too.
+    for flag in ["--console", "--Console"] {
+        let series_s = parse(&["--game-dir", "G", flag, "series-s"]);
+        assert_eq!(series_s.console, Console::SeriesS);
+        let mut expected = expected_head.to_vec();
+        expected.extend(["--console", "series-s"].map(OsString::from));
+        assert_eq!(
+            args_of(victory.game_command_as(&game, &Env::new(), series_s.console)),
+            expected
+        );
+    }
+    assert_eq!(
+        parse(&["--game-dir", "G", "--console", "series-x"]).console,
+        Console::SeriesX
+    );
+}
+
+#[test]
 fn a_missing_xg_library_is_an_error() {
     let args = parse(&["--game-dir", "G", "--xg-dll", "does-not-exist/xg_xs.dll"]);
     assert!(matches!(environment(&args), Err(RunError::NoXgDll(_))));

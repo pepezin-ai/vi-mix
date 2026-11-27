@@ -258,6 +258,7 @@ impl Pool {
     }
 
     fn help(&self) {
+        let mut priority = crate::cores::Priority::new();
         let mut state = self.state();
         loop {
             let Some((work, i)) = take(&mut state) else {
@@ -266,6 +267,7 @@ impl Pool {
             };
             state.running += 1;
             drop(state);
+            let _ = priority.keep();
             let working = crate::timeline::span("a landing's job");
             // SAFETY: counted in `running`, so `each` has not returned.
             let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { (*work.0)(i) }));

@@ -1,9 +1,4 @@
-"""Parity of the runtime DLLs ported to Rust (crates/anyxboxx-*) with the C++ ones (runtime/).
-
-For each ported DLL, a runtime folder is assembled from the C++ build with that one DLL replaced by
-the Rust cdylib, and the pytest files that check the C++ DLL run unchanged against it
-(ANYXBOXX_RUNTIME points at the mixed folder). The C++ DLL is deleted only once this passes.
-"""
+"""Check the installed Rust runtime against an independently built C++ oracle."""
 import os
 import re
 import shutil
@@ -14,46 +9,43 @@ from pathlib import Path
 import pefile
 import pytest
 
-from conftest import RUNTIME_DIR, runtime_built
+from conftest import RUNTIME_DIR
 
 REPO = Path(__file__).resolve().parents[1]
-RUST_RELEASE = REPO / "target" / "release"
-# DLL name in the runtime folder → (Rust cdylib in target/release, pytest files of the C++ DLL).
-PORTED = {
-    "xgameruntime.dll": (
-        "xgameruntime.dll",
-        [str(p.relative_to(REPO)) for pattern in ("tests/test_gdk_*.py", "tests/test_runtime_*.py")
-         for p in sorted(REPO.glob(pattern))] + ["tests/test_native_services.py"],
-    ),
-}
+DLL = "xgameruntime.dll"
+RUST = REPO / os.environ.get("CARGO_TARGET_DIR", "target") / "release" / DLL
+ORACLE = RUNTIME_DIR.parent / "oracle" / DLL
+SUITE = [str(p.relative_to(REPO)) for p in sorted((REPO / "tests").glob("test_runtime_*.py"))]
+SUITE += ["tests/test_gdk_boot.py", "tests/test_native_services.py", "tests/test_saves.py",
+          "tests/test_perf.py", "tests/test_package.py"]
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows DLLs")
 # Skip reasons that only mean the machine lacks an optional component.
 ALLOWED_SKIPS = ("runtime GDK de Windows absent",)
 
 
-def mixed_runtime(tmp_path, name, rust_file):
-    folder = tmp_path / "runtime"
-    shutil.copytree(RUNTIME_DIR, folder)
-    shutil.copyfile(RUST_RELEASE / rust_file, folder / name)
-    return folder
+@pytest.fixture
+def built(runtime_dir):
+    for dll in (RUST, ORACLE):
+        if not dll.is_file():
+            if os.environ.get("ANYXBOXX_REQUIRE_RUNTIME") == "1":
+                pytest.fail(f"Missing runtime artifact {dll}")
+            pytest.skip(f"Missing runtime artifact {dll}")
+    return runtime_dir / DLL
 
 
-@pytest.mark.parametrize("name", sorted(PORTED))
-def test_cpp_tests_pass_against_the_rust_dll(tmp_path, name):
-    rust_file, test_files = PORTED[name]
-    missing = [p for p in (RUST_RELEASE / rust_file,) if not p.is_file()]
-    if missing or not runtime_built():
-        if os.environ.get("ANYXBOXX_REQUIRE_RUNTIME") == "1":
-            pytest.fail(f"absent: {missing or RUNTIME_DIR} (cargo build --release; cmake runtime/)")
-        pytest.skip("Rust DLL or C++ runtime not built")
-    folder = mixed_runtime(tmp_path, name, rust_file)
+@pytest.mark.parametrize("cpp", [False, True], ids=["rust", "cpp"])
+def test_runtime_suite(tmp_path, built, cpp):
+    folder = tmp_path / "bin"
+    shutil.copytree(built.parent, folder)
+    if cpp:
+        shutil.copyfile(ORACLE, folder / DLL)
     env = {**os.environ, "ANYXBOXX_RUNTIME": str(folder), "ANYXBOXX_REQUIRE_RUNTIME": "1",
-           "ANYXBOXX_TEST_RUST_XGAMERUNTIME": "1"}
+           "ANYXBOXX_TEST_CPP_ORACLE": str(int(cpp)), "ANYXBOXX_SYSTEM_RUNTIME": "0"}
     done = subprocess.run([sys.executable, "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider",
-                           f"--basetemp={tmp_path / 'nested'}", *test_files],
+                           f"--basetemp={tmp_path / 'nested'}", *SUITE],
                           cwd=REPO, env=env, capture_output=True, text=True, timeout=600)
     summary = done.stdout.strip().splitlines()[-1] if done.stdout.strip() else done.stderr
-    assert done.returncode == 0, done.stdout[-4000:]
+    assert done.returncode == 0, done.stdout[-4000:] + done.stderr[-2000:]
     passed = re.search(r"(\d+) passed", summary)
     skips = [line for line in done.stdout.splitlines() if line.startswith("SKIPPED")]
     # Only skips that depend on the machine are accepted: the Windows GDK runtime is not
@@ -63,17 +55,12 @@ def test_cpp_tests_pass_against_the_rust_dll(tmp_path, name):
 
 
 def exports(path):
-    image = pefile.PE(str(path), fast_load=True)
-    image.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_EXPORT"]])
-    directory = getattr(image, "DIRECTORY_ENTRY_EXPORT", None)
-    return {(s.name, s.forwarder) for s in directory.symbols} if directory else set()
+    with pefile.PE(str(path), fast_load=True) as image:
+        image.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_EXPORT"]])
+        return {(s.ordinal, s.name, s.forwarder) for s in image.DIRECTORY_ENTRY_EXPORT.symbols}
 
 
-@pytest.mark.parametrize("name", sorted(PORTED))
-def test_rust_dll_exports_what_the_cpp_dll_exports(name):
-    rust = RUST_RELEASE / PORTED[name][0]
-    if not rust.is_file() or not (RUNTIME_DIR / name).is_file():
-        if os.environ.get("ANYXBOXX_REQUIRE_RUNTIME") == "1":
-            pytest.fail(f"absent: {rust} or {RUNTIME_DIR / name}")
-        pytest.skip("Rust DLL or C++ runtime not built")
-    assert exports(rust) == exports(RUNTIME_DIR / name)
+def test_installed_dll_is_rust_and_matches_cpp_exports(built):
+    assert built.read_bytes() == RUST.read_bytes()
+    assert built.read_bytes() != ORACLE.read_bytes()
+    assert exports(built) == exports(ORACLE)

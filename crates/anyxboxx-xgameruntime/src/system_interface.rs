@@ -179,11 +179,9 @@ unsafe extern "system" fn feature_available(_this: *mut c_void, _feature: u32) -
 unsafe extern "system" fn launch_uri(
     _this: *mut c_void,
     _a: *mut c_void,
-    uri: *const c_char,
+    _uri: *const c_char,
 ) -> HResult {
-    if !uri.is_null() {
-        crate::log::trace!("[runtime] XLaunchUri refusé");
-    }
+    crate::log::write(format_args!("[runtime] XLaunchUri -> E_NOTIMPL"));
     E_NOTIMPL
 }
 

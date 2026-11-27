@@ -79,7 +79,11 @@ NOT_IMPLEMENTED_LINE = re.compile(r'ANYXBOXX_NOT_IMPLEMENTED,\s*//\s*\d+\s+(X\w+
 
 
 def not_implemented_functions(sources=RUNTIME_SOURCES):
-    """Fonctions X* que les tables C++ du runtime branchent sur ANYXBOXX_NOT_IMPLEMENTED."""
+    """Refus du runtime Rust, ou tables C++ pour un ancien dépôt donné en entrée."""
+    try:
+        return set((Path(sources) / "unsupported.txt").read_text(encoding="utf-8").splitlines())
+    except FileNotFoundError:
+        pass
     return {name for path in Path(sources).glob("*.cpp")
             for name in NOT_IMPLEMENTED_LINE.findall(path.read_text(encoding="utf-8"))}
 

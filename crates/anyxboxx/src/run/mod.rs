@@ -27,6 +27,26 @@ pub enum Profile {
     Defaults,
 }
 
+/// The console model the title sees, VIctory's `victory run --console` (device type and memory plan).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum Console {
+    /// Xbox Series X, VIctory's default: nothing is passed, so the command stays as it was.
+    #[default]
+    SeriesX,
+    /// Xbox Series S: the title asks for half the memory plan and renders at 1280x720.
+    SeriesS,
+}
+
+impl Console {
+    /// The arguments that ask VIctory for this console: none for its default, Series X.
+    pub fn victory_args(self) -> &'static [&'static str] {
+        match self {
+            Console::SeriesX => &[],
+            Console::SeriesS => &["--console", "series-s"],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum XgMode {
     /// Serve the title from xg_xs.dll.
@@ -103,6 +123,10 @@ pub struct RunArgs {
     /// Set VICTORY_CARD_REHASH_RUNS=1 (hash adjacent GPU memory ranges in batches).
     #[arg(long, alias = "BatchCardRehash")]
     pub batch_card_rehash: bool,
+    /// The console the title sees: `series-x` (default) or `series-s`, the profile VIctory sizes
+    /// for 8 GB cards (half the memory plan, 1280x720 rendering).
+    #[arg(long, alias = "Console", value_enum, default_value_t = Console::SeriesX)]
+    pub console: Console,
     /// Use this victory.exe, built beforehand, and skip the cargo build (for Proton, where there
     /// is no cargo: cross-build VIctory on Linux with `--target x86_64-pc-windows-msvc`).
     /// The repository is then not needed.
@@ -179,7 +203,10 @@ pub fn run(args: &RunArgs, repo: Option<&Path>) -> Result<i32, RunError> {
         println!("Preparing the recorded host pipelines before launch...");
         warm_or_fail(&mut victory.warm_command(&[], &env))?;
     }
-    status(&mut victory.game_command(&args.game_dir, &env), "victory")
+    status(
+        &mut victory.game_command_as(&args.game_dir, &env, args.console),
+        "victory",
+    )
 }
 
 fn warm_or_fail(command: &mut Command) -> Result<(), RunError> {

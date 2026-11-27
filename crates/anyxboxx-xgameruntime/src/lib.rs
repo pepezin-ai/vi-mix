@@ -5,10 +5,8 @@
 //! The title does not link the runtime directly: `xgameruntime.lib` loads this DLL, calls the
 //! `InitializeApiImpl*` functions, then asks each interface through `QueryApiImpl`.
 //!
-//! Done: the entry points and their C++ results, the served-interface table (objects built from
-//! `served_interfaces.inc`, sized from `gdk_api_table.inc`), delegation to Windows' runtime.
-//! Not yet: the methods of the served objects (they answer `E_NOTIMPL` and log), the registry
-//! simulation, the HDR normalisation and the frame counter; see the crate's report.
+//! The two GDK tables are shared with the C++ oracle. VIctory supplies the task queue.
+//! The remaining objects, registry, DXGI hooks and HDR normalization are implemented here.
 
 #![allow(non_snake_case)]
 

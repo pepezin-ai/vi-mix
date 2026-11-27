@@ -15,5 +15,6 @@ __pycache__/
 
 # Root Cargo workspace (crates/)
 /target/
+/target-codex/
 # Build folder of the former rust/ workspace (merged into crates/), left on disk by older builds
 /rust/target/

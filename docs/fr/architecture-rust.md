@@ -200,7 +200,7 @@ Finie quand : `emu/loader.py`, `modules.py`, `report.py`, `status_map.py`, `tran
 - [ ] Des crates cdylib exportent les mêmes symboles que les fichiers `.def` ;
       `tools/kernelx_exports.py` et `gdk_interfaces.py` passent dans `xtask` et génèrent les
       tables d'exports Rust.
-- [ ] Les tests pytest du runtime passent avec `ANYXBOXX_RUNTIME` pointant vers les DLL Rust.
+- [x] Les tests pytest du runtime passent avec `ANYXBOXX_RUNTIME` pointant vers les DLL Rust.
 - [ ] Les modules de `victory-hle` appellent `anyxboxx-gdk` là où AnyXboxX avait le meilleur
       comportement.
 - [ ] **Objectif de performance :** avec l'ancien `anyxboxx run` et le compteur d'images
@@ -305,3 +305,5 @@ Les paragraphes ci-dessous gardent les options telles qu'elles ont été pesées
 ## État
 
 Phase 0 faite dans la pull request « refactor: Rust architecture plan and first ported component ».
+
+Le runtime natif charge désormais les six DLL Rust. Les trois cibles C++ servent aux tests de parité. Les fichiers de données GDK partagés, les interfaces testées et les commandes de compilation figurent dans [l’inventaire du runtime](rust-full-status.md#inventaire-de-xgameruntime-sous-windows-x64).

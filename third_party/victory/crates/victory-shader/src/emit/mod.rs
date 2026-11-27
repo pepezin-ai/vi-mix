@@ -499,6 +499,7 @@ pub fn emit(
     // on its own)
     let exact_only = matches!(&original, Err(ShaderError::Unsupported { what, .. }) if *what == lower::MASK_ELSEWHERE);
     if stuck && native.stage == HwStage::Cs && native.wave64 && lower::host_max_wave() == 32 {
+        // `VICTORY_WAVE_WHY` must stay diagnostic-only (excluded from shader cache key in build.rs).
         let why = std::env::var_os("VICTORY_WAVE_WHY").is_some();
         let report = |what: &str, r: &Result<(HostShader, Option<u32>), ShaderError>| {
             if why {
@@ -725,6 +726,7 @@ pub fn emit(
                 && what == lower::LANE_MASK
                 && std::env::var_os("VICTORY_WAVE_WIDE").is_none_or(|v| v != "0") =>
         {
+            // `VICTORY_WAVE_WHY` must stay diagnostic-only (excluded from shader cache key in build.rs).
             let again = widen(c, native, p, std::env::var_os("VICTORY_WAVE_WHY").is_some(), false);
             match again {
                 Ok(_) => again,

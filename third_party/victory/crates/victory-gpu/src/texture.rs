@@ -1270,6 +1270,17 @@ impl Staging {
             return u32::MAX;
         }
         let tail = (self.layout.first_tail_mip as usize).min(mips.len());
+        // The size cap (`crate::tiles::max_size`): levels over it are never
+        // the title's here, as if no view showed them.
+        let first = match crate::tiles::max_size() {
+            Some(cap) => {
+                let desc = &self.layout.desc;
+                let within =
+                    crate::tiles::first_within(u64::from(desc.width), u64::from(desc.height), mips.len() as u32, cap);
+                first.max(u64::from(within))
+            }
+            None => first,
+        };
         let there = |from: u64, to: u64| {
             to > from && to <= limit && committed(self.memory.wrapping_add(from as usize), (to - from) as usize)
         };
@@ -2057,6 +2068,12 @@ fn staging(resource: This, copy: &crate::resource::HostTexture, first: u32) -> O
         waiting: std::sync::atomic::AtomicU64::new(0),
         exact: std::sync::atomic::AtomicBool::new(BAKING.get()),
     });
+    // A copy its texture no longer has (a thread took it before the swap
+    // let the texture's staging go): this list uploads it, but the
+    // texture's staging and staged level stay those of its new copy.
+    if copy.replaced.load(std::sync::atomic::Ordering::Relaxed) {
+        return Some(s);
+    }
     map.insert(resource as usize, s.clone());
     crate::resource::set_staged_first(resource, s.first);
     Some(s)

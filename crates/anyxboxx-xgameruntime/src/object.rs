@@ -6,7 +6,7 @@
 
 use std::ffi::c_void;
 
-use crate::log::trace;
+use crate::log;
 
 pub type HResult = i32;
 pub const S_OK: HResult = 0;
@@ -79,7 +79,9 @@ unsafe extern "system" fn release(_this: *mut c_void) -> u32 {
 
 /// A method we know the slot of but have not written: logged, then `E_NOTIMPL`.
 pub unsafe extern "system" fn not_implemented(_this: *mut c_void) -> HResult {
-    trace!("[runtime] méthode d'interface non écrite appelée -> E_NOTIMPL");
+    log::write(format_args!(
+        "[runtime] méthode d'interface non écrite appelée -> E_NOTIMPL"
+    ));
     E_NOTIMPL
 }
 

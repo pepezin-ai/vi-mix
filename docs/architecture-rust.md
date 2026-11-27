@@ -189,7 +189,7 @@ Done when: `emu/loader.py`, `modules.py`, `report.py`, `status_map.py`, `transla
       The GDK task queue reuses `victory-hle`'s `xasync` instead of libHttpClient's `Task`.
 - [ ] cdylib crates export the same symbols as the `.def` files; `tools/kernelx_exports.py`
       and `gdk_interfaces.py` move to `xtask` and generate the Rust export tables.
-- [ ] The runtime pytest tests pass with `ANYXBOXX_RUNTIME` pointing at the Rust DLLs.
+- [x] The runtime pytest tests pass with `ANYXBOXX_RUNTIME` pointing at the Rust DLLs.
 - [ ] `victory-hle` modules call `anyxboxx-gdk` where AnyXboxX had the better behaviour.
 - [ ] **Perf goal:** with the former `anyxboxx run` and the frame counter
       (`ANYXBOXX_FPS_CSV`, `emu/perf.py`), average frame time and 1 % low over the same scene
@@ -283,3 +283,5 @@ The paragraphs below keep the options as they were weighed.
 ## Status
 
 Phase 0 done in the pull request "refactor: Rust architecture plan and first ported component".
+
+The native runtime now loads all six Rust DLLs. Three C++ targets supply the parity tests. The [runtime inventory](rust-full-status.md#windows-x64-xgameruntime-inventory) lists the shared GDK data files, tested interfaces and build commands.

@@ -39,7 +39,7 @@
 <text x="300" y="386" font-size="11" fill="#4b5263">served by TomBox's d3d12_xs.dll (194/200 methods by their count), not yet tried with a game</text>
 <text x="270" y="412" text-anchor="end" fill="#1d2230">GDK runtime functions served by AnyXboxX</text>
 <rect x="300" y="398" width="220" height="18" rx="3" fill="#e3e6ee"/>
-<rect x="300" y="398" width="117" height="18" rx="3" fill="#e8890c"/>
-<text x="532" y="412" fill="#1d2230">210/396 (53%)</text>
+<rect x="300" y="398" width="110" height="18" rx="3" fill="#e8890c"/>
+<text x="532" y="412" fill="#1d2230">198/396 (50%)</text>
 <text x="300" y="432" font-size="11" fill="#4b5263">26/34 interfaces (used when the Windows GDK runtime is off)</text>
 </svg>

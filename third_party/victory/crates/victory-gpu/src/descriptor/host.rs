@@ -4419,6 +4419,38 @@ fn buffer_uav(
     Some(Some(shadow.buffer.clone()))
 }
 
+/// Whether the host device can create a writable typed UAV in this format.
+fn typed_uav_store(format: DXGI_FORMAT) -> bool {
+    let Some(host) = host() else {
+        return false;
+    };
+    // The runtime uses one D3D12 device. Cache the DXGI formats used by
+    // descriptor writes so repeated views do not query the driver again.
+    static SUPPORT: [std::sync::OnceLock<bool>; 256] =
+        [const { std::sync::OnceLock::new() }; 256];
+    let query = || {
+        let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+            Format: format,
+            ..Default::default()
+        };
+        // SAFETY: the query writes the given format support structure.
+        let result = unsafe {
+            host.device.CheckFeatureSupport(
+                D3D12_FEATURE_FORMAT_SUPPORT,
+                (&raw mut support).cast(),
+                size_of_val(&support) as u32,
+            )
+        };
+        result.is_ok()
+            && support.Support1.contains(D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW)
+            && support.Support2.contains(D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)
+    };
+    match SUPPORT.get(format.0 as usize) {
+        Some(cached) => *cached.get_or_init(query),
+        None => query(),
+    }
+}
+
 /// Whether the host can make a shader (or unordered access) view of
 /// `texture` in `format` (none: the texture's own). The console allows any
 /// view; the host refuses (and removes the device for) views without the
@@ -4460,25 +4492,26 @@ fn fits(texture: &ID3D12Resource, mut format: Option<&mut DXGI_FORMAT>, unordere
         format.0 = linear as i32;
     }
     let view = format.as_ref().map_or(0, |f| f.0 as u32);
-    if view == 0 {
-        return !typeless;
+    if view == 0 && typeless {
+        return false;
     }
-    // A view of a target whose format the host refuses, in the title's
-    // format: in the stand-in the host copy has.
-    if view != own && crate::resource::target_format(view) == own {
-        if let Some(format) = format {
-            *format = d.Format;
-        }
-        return true;
-    }
-    if family(view) != family(own) {
+    // A view in the title's format can name the host's stand-in.
+    let stand_in = view != 0 && view != own && crate::resource::target_format(view) == own;
+    if view != 0 && !stand_in && family(view) != family(own) {
         once!(view, own, "view format of another family");
         return false;
     }
+    let resolved = if typeless && !stand_in { DXGI_FORMAT(view as i32) } else { d.Format };
+    // Ask about the format the native call will actually use, after
+    // resolving sRGB, typed resources and target stand-ins.
+    if unordered && !typed_uav_store(resolved) {
+        once!(format = resolved.0, "the host cannot store through this texture UAV format");
+        return false;
+    }
     if let Some(format) = format
-        && !typeless
+        && (view != 0 || unordered)
     {
-        *format = d.Format;
+        *format = resolved;
     }
     true
 }
@@ -4631,6 +4664,8 @@ fn make_twinned(
     let host = host()?;
     let device = &host.device;
     match view {
+        // A zero-sized CBV is unbound; the caller writes a typed null slot.
+        View::Constant(_, 0) => None,
         &View::Constant(address, size) => {
             let shadow = crate::shadow::find(address, u64::from(size))?;
             let gpu = shadow.gpu(address);
@@ -4888,18 +4923,31 @@ fn show_prefilled(desc: &mut D3D12_SHADER_RESOURCE_VIEW_DESC, levels: u32) {
 /// The view `desc` of a texture, of a host copy of its levels from `base`
 /// on (`crate::resource::held_only`). What it shows of larger ones, if any,
 /// is left out.
+/// (A 2D array view of the one-layer texture too: the size cap,
+/// `crate::tiles::max_size`, gives such copies a later first level whatever
+/// views the title makes of them.)
 fn from_base(desc: &mut D3D12_SHADER_RESOURCE_VIEW_DESC, base: u32) {
-    if desc.ViewDimension != D3D12_SRV_DIMENSION_TEXTURE2D {
-        return;
+    let rebase = |most: &mut u32, mips: &mut u32, clamp: &mut f32| {
+        let lost = base.saturating_sub(*most);
+        *most = most.saturating_sub(base);
+        if *mips != u32::MAX {
+            *mips = mips.saturating_sub(lost).max(1);
+        }
+        *clamp = (*clamp - base as f32).max(0.0);
+    };
+    match desc.ViewDimension {
+        D3D12_SRV_DIMENSION_TEXTURE2D => {
+            // SAFETY: the member its dimension says.
+            let t = unsafe { &mut desc.Anonymous.Texture2D };
+            rebase(&mut t.MostDetailedMip, &mut t.MipLevels, &mut t.ResourceMinLODClamp);
+        }
+        D3D12_SRV_DIMENSION_TEXTURE2DARRAY => {
+            // SAFETY: the member its dimension says.
+            let t = unsafe { &mut desc.Anonymous.Texture2DArray };
+            rebase(&mut t.MostDetailedMip, &mut t.MipLevels, &mut t.ResourceMinLODClamp);
+        }
+        _ => {}
     }
-    // SAFETY: the member its dimension says.
-    let t = unsafe { &mut desc.Anonymous.Texture2D };
-    let lost = base.saturating_sub(t.MostDetailedMip);
-    t.MostDetailedMip = t.MostDetailedMip.saturating_sub(base);
-    if t.MipLevels != u32::MAX {
-        t.MipLevels = t.MipLevels.saturating_sub(lost).max(1);
-    }
-    t.ResourceMinLODClamp = (t.ResourceMinLODClamp - base as f32).max(0.0);
 }
 
 /// Writes of a slot with another view of the placed texture it showed,
@@ -5406,6 +5454,14 @@ fn null_view(at: D3D12_CPU_DESCRIPTOR_HANDLE) {
 mod anisotropic_sampler_tests;
 
 #[cfg(test)]
+#[path = "typed_uav_tests.rs"]
+mod typed_uav_tests;
+
+#[cfg(test)]
+#[path = "alpha_view_tests.rs"]
+mod alpha_view_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -5453,6 +5509,16 @@ mod tests {
         assert_eq!(view(5, u32::MAX, 5.5), (2, u32::MAX, 2.5));
         // (Two levels the copy has not.)
         assert_eq!(view(1, 4, 0.0), (0, 2, 0.0));
+        // A 2D array view of the one-layer texture (the size cap gives
+        // such copies a later first level too).
+        let mut array = srv_desc(&[98, 4, 5768, 0, 0, u32::MAX, 0, 0, 0, 0]);
+        array.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        array.Anonymous.Texture2DArray =
+            D3D12_TEX2D_ARRAY_SRV { MostDetailedMip: 1, MipLevels: 5, FirstArraySlice: 0, ArraySize: 1, PlaneSlice: 0, ResourceMinLODClamp: 0.0 };
+        from_base(&mut array, 2);
+        // SAFETY: the member its dimension says.
+        let t = unsafe { array.Anonymous.Texture2DArray };
+        assert_eq!((t.MostDetailedMip, t.MipLevels, t.ArraySize), (0, 4, 1));
     }
 
     /// 2D textures and arrays have a neutral stand-in, others a null view.
@@ -5692,6 +5758,24 @@ mod tests {
         assert_eq!(constant_bytes(480), 512);
         assert_eq!(constant_bytes(64 << 10), 64 << 10);
         assert_eq!(constant_bytes(u32::MAX), 64 << 10);
+    }
+
+    #[test]
+    fn a_null_cbv_does_not_need_a_host_buffer() {
+        let Some(host) = host() else { return };
+        // SAFETY: one slot for a constant-buffer descriptor on this device.
+        unsafe {
+            let heap: ID3D12DescriptorHeap = host.device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                NumDescriptors: 1,
+                ..Default::default()
+            }).unwrap();
+            let slot = heap.GetCPUDescriptorHandleForHeapStart();
+            let view = View::Constant(0, 0);
+            assert!(make(&view, slot).is_none());
+            null_for(&view, slot);
+            assert!(host.device.GetDeviceRemovedReason().is_ok());
+        }
     }
 
     /// A null 3D UAV made on the real device leaves it alive.

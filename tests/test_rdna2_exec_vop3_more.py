@@ -133,3 +133,18 @@ def test_vop3_literal_operations_without_literal_are_refused(name):
         rdna2_exec.run(code)
     with pytest.raises(rdna2_hlsl.Untranslatable, match="littéral"):
         rdna2_hlsl.translate(code)
+
+
+@pytest.mark.parametrize("mask_code", (V + 4, 209))
+def test_cndmask_refuses_an_unreadable_mask_whatever_exec_holds(mask_code):
+    """S2 of v_cndmask_b32 (VOP3) is a lane mask read as a scalar: a VGPR or a reserved code is refused,
+    also with no lane active. The mask used to be read inside the lane loop only, so EXEC = 0 let it pass."""
+    instruction = vop3("v_cndmask_b32", 3, V + 1, V + 2, src2=mask_code)
+    for no_lanes in ((), (sop1("s_mov_b32", EXEC_LO, 128),)):
+        with pytest.raises(rdna2_exec.Untranslated):
+            rdna2_exec.run(program(*no_lanes, *instruction))
+
+
+def test_cndmask_with_a_readable_mask_and_no_lane_writes_nothing():
+    wave = run(*mov(3, 0x1234), sop1("s_mov_b32", EXEC_LO, 128), *vop3("v_cndmask_b32", 3, V + 1, V + 2, src2=106))
+    assert wave.v[3][0] == 0x1234

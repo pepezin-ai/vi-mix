@@ -86,7 +86,7 @@ pub(super) fn stage() -> u32 {
 /// Whether a copy at its place in a list ([`place`]) is only in the way of
 /// what is done on the card in front of the lists if that stands behind it in
 /// them (`VICTORY_PLACED_ORDER=1`; off: wherever it stands), and a
-/// submission where it does is cut behind the copy's list ([`cut_for`]). Off:
+/// submission where it does is cut behind the copy's list ([`cut_or_plan`]). Off:
 /// the case did not come up once in runs submit-1 to submit-3, so it has only
 /// its tests behind it.
 ///
@@ -458,30 +458,64 @@ fn does_of(written: &[(usize, usize)], runs: &[&HostList]) -> (Vec<Does>, Vec<(u
     (does, steps)
 }
 
+/// What [`cut_or_plan`] worked out for a submission it did not cut: the
+/// steps and the plan of them, which [`Host::card_steps`] takes as they are
+/// if the flights still write what they wrote then (`written`), and works
+/// out again if not. (With `VICTORY_FILL_TITLE=1` `read_blocked` also asks
+/// the watch: that answer is the one from just before the submission lock
+/// was taken.)
+pub(super) struct Preplan {
+    written: Vec<(usize, usize)>,
+    does: Vec<Does>,
+    steps: Vec<(usize, usize)>,
+    chosen: Result<Vec<(usize, u32)>, &'static str>,
+}
+
+/// What [`cut_or_plan`] found.
+pub(super) enum CutOrPlan {
+    /// The submission is cut before this one of its lists.
+    Cut(usize),
+    /// It is not cut; its steps and their plan, for [`Host::card_steps`].
+    Plan(Preplan),
+    /// It is not cut, and nothing was worked out.
+    None,
+}
+
 /// With flights in the air: before which of `runs` the submission is cut so
 /// that what reads or writes the bytes of a copy at its place in an earlier
 /// list ([`BEHIND_PLACED`]) is done on the card in front of a submission of
-/// its own, behind that copy.
-pub(super) fn cut_for(runs: &[&HostList]) -> Option<usize> {
+/// its own, behind that copy. A submission that is not cut keeps the steps
+/// and the plan made to find that out ([`Preplan`]): they were made a second
+/// time under the submission lock.
+pub(super) fn cut_or_plan(runs: &[&HostList]) -> CutOrPlan {
     if stage() == 0 || !relay_exact() || !placed_order() || runs.len() < 2 {
-        return None;
+        return CutOrPlan::None;
     }
     // (Most submissions have none.)
-    let first = runs.iter().position(|l| l.deferred().copies.iter().any(|s| matches!(s, Step::Placed(_))))?;
+    let Some(first) = runs.iter().position(|l| l.deferred().copies.iter().any(|s| matches!(s, Step::Placed(_)))) else {
+        return CutOrPlan::None;
+    };
     if first + 1 == runs.len() {
-        return None;
+        return CutOrPlan::None;
     }
     let written = line().written.clone();
-    blocked_by(&written, runs, false)?;
+    if blocked_by(&written, runs, false).is_none() {
+        return CutOrPlan::None;
+    }
     let (does, steps) = does_of(&written, runs);
     let mut behind = None;
-    if plan(&does, stage(), true, &mut behind) != Err(BEHIND_PLACED) {
-        return None;
+    let chosen = plan(&does, stage(), true, &mut behind);
+    if chosen == Err(BEHIND_PLACED) {
+        let cut = behind.and_then(|(placed, reader)| {
+            let place = |i: usize| runs.iter().position(|l| std::ptr::from_ref::<HostList>(l) as usize == steps[i].0);
+            let cut = place(placed)? + 1;
+            (place(reader)? >= cut).then_some(cut)
+        });
+        if let Some(cut) = cut {
+            return CutOrPlan::Cut(cut);
+        }
     }
-    let (placed, reader) = behind?;
-    let place = |i: usize| runs.iter().position(|l| std::ptr::from_ref::<HostList>(l) as usize == steps[i].0);
-    let cut = place(placed)? + 1;
-    (place(reader)? >= cut).then_some(cut)
+    CutOrPlan::Plan(Preplan { written, does, steps, chosen })
 }
 
 /// Whether every page of `[from, to)` can be read (through the kernel:
@@ -653,7 +687,7 @@ impl Host {
     /// now is reads of title memory that can all be done on the card
     /// ([`stage`]), the list that does them. `None` if nothing is in the
     /// way or the old wait is due. Under the submission lock.
-    pub(super) fn card_steps(&self, runs: &[&HostList]) -> Option<Taken> {
+    pub(super) fn card_steps(&self, runs: &[&HostList], preplan: Option<Preplan>) -> Option<Taken> {
         if stage() == 0 || !relay_exact() {
             return None;
         }
@@ -671,7 +705,8 @@ impl Host {
         let taken = if read {
             Err("a copy done on the card is read through another host copy")
         } else {
-            self.take_steps(&written, runs)
+            // (Only for the flights it was made for.)
+            self.take_steps(&written, runs, preplan.filter(|p| p.written == written))
         };
         match taken {
             Ok(taken) => taken,
@@ -685,10 +720,21 @@ impl Host {
         }
     }
 
-    fn take_steps(&self, written: &[(usize, usize)], runs: &[&HostList]) -> Result<Option<Taken>, &'static str> {
+    fn take_steps(
+        &self,
+        written: &[(usize, usize)],
+        runs: &[&HostList],
+        preplan: Option<Preplan>,
+    ) -> Result<Option<Taken>, &'static str> {
         let mut spent = crate::timeline::span("steps on the card: chosen");
-        let (does, steps) = does_of(written, runs);
-        let chosen = plan(&does, stage(), placed_order(), &mut None)?;
+        let (does, steps, chosen) = match preplan {
+            Some(p) => (p.does, p.steps, p.chosen?),
+            None => {
+                let (does, steps) = does_of(written, runs);
+                let chosen = plan(&does, stage(), placed_order(), &mut None)?;
+                (does, steps, chosen)
+            }
+        };
         if chosen.is_empty() {
             return Ok(None);
         }

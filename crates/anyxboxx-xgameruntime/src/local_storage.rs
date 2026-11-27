@@ -9,7 +9,6 @@ use std::path::Path;
 
 use victory_hle::modules::xasync::AsyncBlock;
 
-use crate::log::trace;
 use crate::object::{E_INVALIDARG, E_NOTIMPL, HResult, S_OK};
 use crate::save_async::{self, Completion};
 use crate::save_store;
@@ -150,7 +149,9 @@ unsafe extern "system" fn mount_for_package(
         // SAFETY: `mount` is writable, per the title's contract.
         unsafe { *mount = std::ptr::null_mut() };
     }
-    trace!("[runtime] stockage d'un autre paquet : pas encore pris en charge");
+    crate::log::write(format_args!(
+        "[runtime] XPersistentLocalStorageMountForPackage -> E_NOTIMPL"
+    ));
     E_NOTIMPL
 }
 

@@ -2,8 +2,7 @@
 //! with every privilege. Port of `runtime/xgameruntime/user_interface.cpp`; the XUID and the
 //! gamertag are the C++ ones (`ANYXBOXX_GAMERTAG`, default "AnyXboxX"), since the tests check them.
 //!
-//! Not written yet (E_NOTIMPL): the gamer picture (slots 16 to 18, `gamer_picture.cpp`) and the
-//! Xbox Live tokens (slots 23 to 28, which the C++ also refuses with E_NOTIMPL).
+//! The gamer picture is generated locally. Xbox Live token requests are refused offline.
 
 use std::ffi::{c_char, c_void};
 use std::sync::OnceLock;
@@ -35,14 +34,23 @@ struct UserHandle {
     magic: u32,
 }
 
-/// The gamertag from `ANYXBOXX_GAMERTAG` (read once), at most 15 characters, else the default.
-fn gamertag() -> &'static str {
-    static GAMERTAG: OnceLock<String> = OnceLock::new();
+/// The oracle reads the configured name in the Windows process ANSI code page.
+fn gamertag() -> &'static [u8] {
+    static GAMERTAG: OnceLock<Vec<u8>> = OnceLock::new();
     GAMERTAG.get_or_init(|| {
-        std::env::var("ANYXBOXX_GAMERTAG")
-            .ok()
-            .filter(|text| !text.is_empty() && text.len() <= MAX_GAMERTAG && text.is_ascii())
-            .unwrap_or_else(|| DEFAULT_GAMERTAG.to_string())
+        let mut bytes = [0u8; MAX_GAMERTAG + 1];
+        // SAFETY: the name is NUL-terminated and the buffer has the supplied capacity.
+        let len = unsafe {
+            windows_sys::Win32::System::Environment::GetEnvironmentVariableA(
+                c"ANYXBOXX_GAMERTAG".as_ptr().cast(),
+                bytes.as_mut_ptr(),
+                bytes.len() as u32,
+            )
+        } as usize;
+        match len {
+            1..=MAX_GAMERTAG => bytes[..len].to_vec(),
+            _ => DEFAULT_GAMERTAG.as_bytes().to_vec(),
+        }
     })
 }
 
@@ -504,8 +512,9 @@ unsafe extern "system" fn gamer_picture_result(
     )
 }
 
-/// Not reachable offline: Xbox Live tokens (slots 23 to 28) and the UI-resolved issues (31).
+/// Not reachable offline: Xbox Live tokens (slots 23 to 28).
 unsafe extern "system" fn not_available(_this: *mut c_void) -> HResult {
+    crate::log::write(format_args!("[runtime] XUser Xbox Live token -> E_NOTIMPL"));
     E_NOTIMPL
 }
 
@@ -517,7 +526,7 @@ static EMPTY_IDENTITY: [u8; 1] = [0];
 fn trace_add(options: u64) {
     crate::log::trace!(
         "[runtime] XUserAddAsync (options 0x{options:x}) -> profil local « {} »",
-        gamertag()
+        String::from_utf8_lossy(gamertag())
     );
 }
 
@@ -537,7 +546,7 @@ unsafe extern "system" fn get_gamertag(
         return E_INVALIDARG;
     }
     let text = if component == GAMERTAG_MODERN_SUFFIX {
-        ""
+        &[]
     } else {
         gamertag()
     };

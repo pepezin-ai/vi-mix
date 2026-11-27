@@ -123,6 +123,62 @@ extern "system" fn completed_called(this: This) -> u64 {
     crate::timeline::polled(this as usize, value);
     value
 }
+/// Maximum time a blocking null-event fence wait will wait before giving up
+/// instead of hanging the title thread forever.
+#[cfg(windows)]
+const NULL_EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(windows)]
+fn wait_null_event(
+    fence: &Fence,
+    value: u64,
+    mut waiters: std::sync::MutexGuard<'_, Vec<(u64, usize)>>,
+    timeout: std::time::Duration,
+) -> HRESULT {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+
+    // SAFETY: a private, initially unsignaled event.
+    let handle = match unsafe { CreateEventW(None, false, false, None) } {
+        Ok(handle) => handle,
+        Err(error) => return error.code().0,
+    };
+    waiters.push((value, handle.0 as usize));
+    drop(waiters);
+    // A queued signal may follow work that has not been submitted or settled yet.
+    crate::queue::before_sync();
+    crate::host::settle_for_fence();
+    let deadline = std::time::Instant::now() + timeout;
+    let result = loop {
+        // A direct write to the exposed fence word or settle_for_fence() may already have reached value.
+        if fence.value.load(Ordering::Acquire) >= value {
+            break S_OK;
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            tracing::warn!(value, "blocking fence wait timed out");
+            break E_NOTIMPL;
+        }
+        let ms = (deadline - now).as_millis().min(10) as u32;
+        // SAFETY: this call owns the event until it unregisters the waiter.
+        match unsafe { WaitForSingleObject(handle, ms.max(1)) } {
+            WAIT_OBJECT_0 => break S_OK,
+            WAIT_TIMEOUT => {
+                if fence.value.load(Ordering::Acquire) >= value {
+                    break S_OK;
+                }
+                crate::queue::release_held(false);
+            }
+            _ => break windows::core::Error::from_thread().code().0,
+        }
+    };
+    let mut waiters = fence.waiters.lock().unwrap_or_else(|e| e.into_inner());
+    waiters.retain(|&(_, pending)| pending != handle.0 as usize);
+    // SAFETY: no signal can still use this event after unregistering it.
+    let _ = unsafe { CloseHandle(handle) };
+    result
+}
+
 extern "system" fn set_event_on_completion(this: This, value: u64, event: *mut c_void) -> HRESULT {
     let fence = fence(this);
     let mut waiters = fence.waiters.lock().unwrap_or_else(|e| e.into_inner());
@@ -135,48 +191,9 @@ extern "system" fn set_event_on_completion(this: This, value: u64, event: *mut c
     #[cfg(all(windows, feature = "diagnostics"))]
     crate::timeline::told("an event asked for", this as usize, value);
     if event.is_null() {
-        // With submissions sent to the card and not waited for
-        // (`crate::host::late`) the signal may be behind them: they are
-        // settled, which sets it.
         #[cfg(windows)]
-        if crate::host::late() {
-            drop(waiters);
-            crate::queue::before_sync();
-            crate::host::settle_for_fence();
-            if fence.value.load(Ordering::Acquire) >= value {
-                return S_OK;
-            }
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
-            loop {
-                let current = fence.value.load(Ordering::Acquire);
-                if current >= value {
-                    return S_OK;
-                }
-                let now = std::time::Instant::now();
-                if now >= deadline {
-                    break;
-                }
-                let ms = (deadline - now).as_millis().min(10) as u32;
-                // SAFETY: wait on the atomic u64 until woken by WakeByAddressAll or timeout.
-                unsafe {
-                    windows_sys::Win32::System::Threading::WaitOnAddress(
-                        (&raw const fence.value).cast(),
-                        (&raw const current).cast(),
-                        size_of::<u64>(),
-                        ms.max(1),
-                    );
-                }
-                crate::queue::release_held(false);
-            }
-            if fence.value.load(Ordering::Acquire) >= value {
-                return S_OK;
-            }
-            tracing::warn!(value, "blocking fence wait timed out");
-            return E_NOTIMPL;
-        }
-        // shortcut: a null event means "block until reached"; nothing can
-        // reach it while no GPU work runs, so fail instead of hanging.
-        tracing::warn!(value, "blocking fence wait not implemented");
+        return wait_null_event(fence, value, waiters, NULL_EVENT_TIMEOUT);
+        #[cfg(not(windows))]
         return E_NOTIMPL;
     }
     waiters.push((value, event as usize));
@@ -276,7 +293,7 @@ mod tests {
         assert_eq!(wait(f, 5, event), S_OK, "already reached");
         // SAFETY: as above.
         assert_eq!(unsafe { WaitForSingleObject(event, 0) }, WAIT_OBJECT_0);
-        assert_eq!(wait(f, 9, std::ptr::null_mut()), E_NOTIMPL);
+        assert_eq!(wait(f, 5, std::ptr::null_mut()), S_OK);
         // The title reads the value at the fence's address.
         let at = slot::<extern "system" fn(This) -> u64>(f, 0x60)(f);
         // SAFETY: the fence's value.
@@ -317,5 +334,180 @@ mod tests {
         assert_eq!(slot::<Flags>(queried, 0x58)(queried), 0x2);
         assert_eq!(slot::<Release>(queried, 0x10)(queried), 1);
         assert_eq!(slot::<Release>(f, 0x10)(f), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn null_event_times_out_and_unregisters_waiter() {
+        let mut f = std::ptr::null();
+        assert_eq!(create(std::ptr::null(), 1, 0, &FENCE_IIDS[0], &mut f), S_OK);
+        let fence_obj = fence(f);
+        let waiters = fence_obj.waiters.lock().unwrap();
+        let hr = wait_null_event(
+            fence_obj,
+            9,
+            waiters,
+            std::time::Duration::from_millis(30),
+        );
+        assert_eq!(hr, E_NOTIMPL, "unreached blocking wait must time out");
+        assert!(
+            fence_obj.waiters.lock().unwrap().is_empty(),
+            "timed-out waiter must be unregistered"
+        );
+        assert_eq!(slot::<extern "system" fn(This) -> u32>(f, 0x10)(f), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn null_event_waits_for_a_queued_gpu_copy() {
+        use std::ptr::null;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+        use windows::Win32::Graphics::Direct3D12::{
+            D3D12_RANGE, ID3D12CommandAllocator, ID3D12CommandQueue, ID3D12GraphicsCommandList,
+        };
+        use windows::core::Interface;
+
+        let Some(host) = crate::host::host() else {
+            eprintln!("skipped queued fence test: no D3D12 device");
+            return;
+        };
+        const MARKER: u32 = 0x1357_9bdf;
+        const TARGET: u64 = 1;
+        let bytes = size_of::<u32>() as u64;
+        let (upload, data) = host.upload_buffer(bytes).unwrap();
+        let output = host.read_back_buffer(bytes).unwrap();
+        // SAFETY: the upload mapping holds one word.
+        unsafe { data.cast::<u32>().write(MARKER) };
+
+        fn iid<T: Interface>() -> Iid {
+            let i = T::IID;
+            guid(i.data1, i.data2, i.data3, i.data4)
+        }
+        let (mut allocator, mut list, mut queue, mut gate, mut done) =
+            (null(), null(), null(), null(), null());
+        assert_eq!(
+            crate::list::create_allocator(
+                null(),
+                0,
+                &iid::<ID3D12CommandAllocator>(),
+                &mut allocator
+            ),
+            S_OK
+        );
+        assert_eq!(
+            crate::list::create_list(
+                null(),
+                0,
+                0,
+                allocator,
+                null(),
+                &iid::<ID3D12GraphicsCommandList>(),
+                &mut list
+            ),
+            S_OK
+        );
+        let queue_desc = [0u32; 4];
+        assert_eq!(
+            crate::queue::create(
+                null(),
+                queue_desc.as_ptr().cast(),
+                &iid::<ID3D12CommandQueue>(),
+                &mut queue
+            ),
+            S_OK
+        );
+        assert_eq!(create(null(), 0, 0, &FENCE_IIDS[0], &mut gate), S_OK);
+        assert_eq!(create(null(), 0, 0, &FENCE_IIDS[0], &mut done), S_OK);
+
+        let host_list = crate::list::host_list(list).unwrap();
+        // SAFETY: an open list and live upload/readback buffers of the given size.
+        unsafe {
+            host_list
+                .list
+                .CopyBufferRegion(&output, 0, &upload, 0, bytes)
+        };
+        assert_eq!(
+            slot::<extern "system" fn(This) -> HRESULT>(list, 0x48)(list),
+            S_OK
+        );
+        let signal_offset = if crate::device::newer() { 0x80 } else { 0x70 };
+        type QueueFence = extern "system" fn(This, This, u64) -> HRESULT;
+        assert_eq!(
+            slot::<QueueFence>(queue, signal_offset + 8)(queue, gate, TARGET),
+            S_OK
+        );
+        slot::<extern "system" fn(This, u32, *const This)>(queue, 0x50)(queue, 1, &list);
+        assert_eq!(
+            slot::<QueueFence>(queue, signal_offset)(queue, done, TARGET),
+            S_OK
+        );
+        assert_eq!(completed(done), 0, "the gate must hold the queue");
+
+        let (sent, result) = mpsc::channel();
+        let (registered, early, outcome) =
+            std::thread::scope(|scope| {
+                let address = done as usize;
+                scope.spawn(move || {
+                    let done = address as This;
+                    let hr = slot::<extern "system" fn(This, u64, *mut c_void) -> HRESULT>(
+                        done, 0x48,
+                    )(done, TARGET, std::ptr::null_mut());
+                    sent.send((hr, completed(done))).unwrap();
+                });
+                // Wait for registration or an early return before opening the gate.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let (registered, early) = loop {
+                    if let Ok(outcome) = result.try_recv() {
+                        break (false, Some(outcome));
+                    }
+                    if fence(done)
+                        .waiters
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|w| w.0 == TARGET)
+                    {
+                        break (true, result.try_recv().ok());
+                    }
+                    if Instant::now() >= deadline {
+                        break (false, None);
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                };
+                signal(gate, TARGET);
+                let outcome = early.or_else(|| result.recv_timeout(Duration::from_secs(5)).ok());
+                if outcome.is_none() {
+                    // Release a pending test thread before reporting a timeout.
+                    set(done, TARGET);
+                }
+                (registered, early, outcome)
+            });
+        crate::host::settle_for_fence();
+        let mut mapped = std::ptr::null_mut();
+        // SAFETY: the queue's list finished, and the readback holds one word.
+        let gpu = unsafe {
+            output.Map(0, None, Some(&mut mapped)).unwrap();
+            let word = mapped.cast::<u32>().read();
+            output.Unmap(0, Some(&D3D12_RANGE::default()));
+            word
+        };
+        for object in [queue, list, allocator, gate, done] {
+            slot::<extern "system" fn(This) -> u32>(object, 0x10)(object);
+        }
+        let (hr, completed) =
+            outcome.expect("null-event waiter did not finish after the queue signal");
+        println!(
+            "late={}, registered={registered}, returned_before_signal={}, HRESULT={:#010x}, fence={completed}, GPU={gpu:#010x}",
+            crate::host::late(),
+            early.is_some(),
+            hr as u32,
+        );
+        assert!(
+            registered && early.is_none(),
+            "null-event wait returned before the signal: HRESULT {:#010x}",
+            hr as u32
+        );
+        assert_eq!((hr, completed, gpu), (S_OK, TARGET, MARKER));
     }
 }

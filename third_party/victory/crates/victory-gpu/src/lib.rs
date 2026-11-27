@@ -47,6 +47,11 @@ pub mod dxgi;
 pub mod fence;
 pub mod frame;
 pub mod frametime;
+// (vt-dlss) DLSS frame generation through NVIDIA Streamline, off unless `VICTORY_FRAME_GEN`.
+#[cfg(windows)]
+pub mod streamline;
+#[cfg(windows)]
+pub mod fg;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod book;
 #[cfg(windows)]

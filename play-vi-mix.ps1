@@ -16,10 +16,18 @@ Keep the title's own output size (4K on Series X) instead of 1920x1080 (measured
 Translate every shader into the cache before the game (first start of a new build: tens of minutes).
 
 .PARAMETER Stock
-Leave out the two vi-mix v8 switches below and start with the creator's settings alone.
+Leave out the vi-mix switches below and start with the creator's settings alone.
+
+.PARAMETER Tuned
+Add the v9 memory switches measured to help on our machine (preliminary): VICTORY_WINDOWS_BAR_MB=2048 and
+VICTORY_SECTION_MB=2. See README.md.
+
+.PARAMETER Override
+Extra KEY=VALUE settings passed to `anyxboxx run --override` (VICTORY_* names only), for example
+-Override VICTORY_GPU_BACK_MAX_KB=64 (read the warning in README.md first).
 
 .NOTES
-vi-mix v8 adds two switches to every start (both read by VIctory, both off in the creator's settings):
+vi-mix adds two switches to every start (both read by VIctory, both off in the creator's settings):
   VICTORY_PIPELINE_HISTORY=0  start without the scheduling history of earlier runs. Whole-picture colour
                               banding came back on some launches with it (TaynanGT/Vice-Tay#44); four
                               launches in a row without it were clean here.
@@ -29,11 +37,14 @@ param(
     [string]$GameDir,
     [switch]$NativeOutput,
     [switch]$Warm,
-    [switch]$Stock
+    [switch]$Stock,
+    [switch]$Tuned,
+    [string[]]$Override
 )
-# The two vi-mix v8 switches (see .NOTES).
+# The two vi-mix switches (see .NOTES), plus the v9 memory switches with -Tuned.
 $mixTweaks = [ordered]@{ VICTORY_PIPELINE_HISTORY = '0'; VICTORY_WIDE_COPY = '1' }
 if ($Stock) { $mixTweaks = [ordered]@{} }
+if ($Tuned) { $mixTweaks['VICTORY_WINDOWS_BAR_MB'] = '2048'; $mixTweaks['VICTORY_SECTION_MB'] = '2' }
 $ErrorActionPreference = 'Stop'
 $state = Join-Path $env:LOCALAPPDATA 'vi-mix'
 New-Item -ItemType Directory -Force $state | Out-Null
@@ -58,6 +69,7 @@ if (-not (Test-Path -LiteralPath $cli)) {
 $argv = @('run', '--game-dir', $GameDir)
 if (-not $NativeOutput) { $argv += @('--override', 'VICTORY_OUTPUT=1920x1080') }
 foreach ($k in $mixTweaks.Keys) { $argv += @('--override', "$k=$($mixTweaks[$k])") }
+foreach ($o in $Override) { $argv += @('--override', $o) }
 if ($Warm) { $argv += '--warm' }
 & $cli @argv
 exit $LASTEXITCODE

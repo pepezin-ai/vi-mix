@@ -1502,6 +1502,23 @@ def test_a_register_group_past_v255_is_an_operand_error_in_rust():
         assert_same(exe, 32, False, [], fits)
 
 
+def test_cndmask_mask_refusals_do_not_depend_on_exec_in_both_models():
+    """VOP3 v_cndmask_b32 reads its lane mask (S2) as a scalar operand. A VGPR or a reserved code there is
+    refused by both models whatever EXEC holds; a readable mask (VCC) runs in both, with or without lanes."""
+    exe = binary()
+    lanes_off = [(126, 0), (127, 0)]
+    for lanes in (32, 64):
+        for mask_code in (V0 + 4, 209):
+            words = program(*vop3("v_cndmask_b32", 3, (V0 + 1, V0 + 2, mask_code)))
+            for scalars in ([], lanes_off):
+                assert run_python(lanes, False, scalars, words) == "error untranslated\n"
+                assert_same(exe, lanes, False, scalars, words)
+        words = program(vop1("v_mov_b32", 2, LITERAL), 0x5555, *vop3("v_cndmask_b32", 3, (V0 + 1, V0 + 2, 106)))
+        for scalars in ([(106, 0xF0F0_F0F0), (107, 0x0F0F_0F0F)], [(106, 0xF0F0_F0F0), *lanes_off]):
+            assert run_python(lanes, False, scalars, words).startswith("steps")
+            assert_same(exe, lanes, False, scalars, words)
+
+
 def test_vop3_integer_clamp_matches_the_python_model():
     exe = binary()
     names = ("v_add_nc_u32", "v_sub_nc_u32", "v_subrev_nc_u32", "v_add_co_u32",

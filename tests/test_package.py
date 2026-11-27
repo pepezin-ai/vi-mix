@@ -2,12 +2,12 @@
 import ctypes
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
 from test_runtime_cpp import S_OK, THREAD_POOL, AsyncBlock, GdkInterface, TaskQueueApi, anyxboxx_only
 
-PACKAGE = ("AF406016-E850-4AA8-A88D-2F3DCB9DAC7E", "0B9D556E-E9C4-4F3B-A5D6-5A2CBAB7BB2A")
 P = ctypes.c_void_p
 PP = ctypes.POINTER(ctypes.c_void_p)
 
@@ -32,13 +32,13 @@ def package(runtime_dir, tmp_path, monkeypatch):
         'Version="1.2.3.4" /><ShellVisuals DefaultDisplayName="Jeu de test" /><StoreId>9ABCDEF</StoreId></Game>',
         encoding="utf-8")
     monkeypatch.setenv("ANYXBOXX_GAME_DIR", str(tmp_path))
-    real = PACKAGE_GUIDS(runtime_dir)
+    real = PACKAGE_GUIDS()
     return GdkInterface(runtime_dir, *real), tmp_path
 
 
-def PACKAGE_GUIDS(runtime_dir):
+def PACKAGE_GUIDS():
     """Couple (fournisseur, interface) d'XPackage relu dans la table générée."""
-    table = (runtime_dir.parents[1] / "xgameruntime" / "gdk_api_table.inc").read_text(encoding="utf-8")
+    table = (Path(__file__).resolve().parents[1] / "runtime" / "xgameruntime" / "gdk_api_table.inc").read_text(encoding="utf-8")
     line = next(line for line in table.splitlines() if "(XPackageIsPackagedProcess," in line)
     return line.split('"')[1], line.split('"')[3]
 
