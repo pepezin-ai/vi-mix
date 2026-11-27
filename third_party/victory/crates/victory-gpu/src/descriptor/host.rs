@@ -3052,6 +3052,9 @@ impl HostHeap {
 
     /// Gives back `n` slots from `first` (an index [`dynamic`] returned)
     /// when they came from this heap.
+    /// Gives back `n` dynamic slots from `first` (an index [`dynamic`]
+    /// returned), retiring any host resources those slots kept alive so
+    /// released dynamic tables do not pin evicted VRAM/shared memory.
     ///
     /// [`dynamic`]: HostHeap::dynamic
     pub(crate) fn release(&self, id: u64, first: u32, n: u32) {
@@ -3061,13 +3064,32 @@ impl HostHeap {
         let Some(at) = first.checked_sub(self.count) else {
             return;
         };
-        let mut guard = self.next.lock().unwrap_or_else(|e| e.into_inner());
-        let end = (at + n).min(self.dynamic) as usize;
-        if let Some(slots) = guard.1.get_mut(at as usize..end) {
-            let given = slots.iter().filter(|taken| **taken).count() as u32;
-            self.free.fetch_add(given, std::sync::atomic::Ordering::Relaxed);
-            self.too_long.store(u32::MAX, std::sync::atomic::Ordering::Relaxed);
-            slots.fill(false);
+        let mut retired: Vec<ID3D12Resource> = Vec::new();
+        {
+            let mut guard = self.next.lock().unwrap_or_else(|e| e.into_inner());
+            let end = (at + n).min(self.dynamic) as usize;
+            if let Some(slots) = guard.1.get_mut(at as usize..end) {
+                let mut given = 0u32;
+                for (offset, taken) in slots.iter_mut().enumerate() {
+                    if *taken {
+                        *taken = false;
+                        given += 1;
+                        let index = (first + offset as u32) as usize;
+                        if let Some(slot) = self.kept.get(index)
+                            && let Some(old) = slot.lock().unwrap_or_else(|e| e.into_inner()).take()
+                        {
+                            retired.push(old);
+                        }
+                    }
+                }
+                if given > 0 {
+                    self.free.fetch_add(given, std::sync::atomic::Ordering::Relaxed);
+                    self.too_long.store(u32::MAX, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+        for old in retired {
+            crate::host::retire_resource(old);
         }
     }
 
@@ -6613,5 +6635,35 @@ mod bake_flip_tests {
         assert_eq!(cb1(), None);
         drop(cb2);
         assert!(take_pending_list_flip(id2).is_none(), "dropping uncalled closure cleans up entry");
+    }
+
+    #[test]
+    fn release_clears_kept_resources_for_dynamic_slots() {
+        let Some(h) = host() else {
+            return; // no host GPU
+        };
+        let Some(heap) = HostHeap::new(false, 4) else {
+            return; // no host GPU
+        };
+        let Some((buf, _)) = h.upload_buffer(256) else {
+            return;
+        };
+        let slot = heap.dynamic(1).unwrap();
+        heap.raw_at(slot, &buf, 0, 256);
+        assert!(
+            heap.kept[slot as usize]
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some(),
+            "dynamic slot must keep its bound host resource before release"
+        );
+        heap.release(heap.id, slot, 1);
+        assert!(
+            heap.kept[slot as usize]
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none(),
+            "releasing a dynamic slot must retire and clear its kept host resource"
+        );
     }
 }
