@@ -4,7 +4,7 @@ A tested mix for running an **Xbox Series title natively on a Windows PC**, from
 
 It is the successor of [pepezin-ai/victory-mix](https://github.com/pepezin-ai/victory-mix) (v5, fxceless base), which stays up as it was. Each time a newer build beats this one on our machine, this repository moves to it.
 
-> **Not fully playable yet.** The open world runs with characters, HUD, water and vegetation at about **11 fps** (frames the game really draws) on the machine below. Ray tracing is off, so interiors and shade are darker than intended.
+> **v7: about 12 fps** (frames the game really draws, never below 8 in our run) in the open world on the machine below, with Smooth Motion showing about twice that. **Not fully playable yet:** ray tracing is off, so interiors and shade are darker than intended.
 
 ## Legal notice
 
@@ -22,12 +22,25 @@ The code is GPL-3.0-or-later, the license of AnyXboxX and VIctory it is built on
 
 | Change | Why |
 |---|---|
-| `play-vi-mix.cmd` / `play-vi-mix.ps1` | One double-click start: asks for your game folder once, keeps saves and caches in `%LOCALAPPDATA%\vi-mix`, forces a 1920x1080 output |
-| Output forced to **1920x1080** (`VICTORY_OUTPUT`) | The title otherwise renders for a 4K Series X: 7.4 → 9.1 fps here. Side effect: the HUD looks larger |
-| **16-thread worker pools** in the PowerShell launcher (`THIN 12 / UNDER 8 / LAND 6` when the PC has 16+ logical CPUs) | `anyxboxx run` got them in upstream #462, `tools/lancer_victory.ps1` did not: 9.1 → **10.9 fps** here |
-| `-SeriesS` switch in `tools/lancer_victory.ps1` | Passes `--console series-s` to VIctory, for comparison (it was slower here: 7.1 fps) |
+| **8 open AnyXboxX pull requests**, merged before upstream does (list below) | Picture fixes, memory and speed on the Vice-Tay base: 7.2 → **12.1 fps** in the same scene here |
+| `play-vi-mix.cmd` / `play-vi-mix.ps1` | One double-click start with the creator's own settings (`anyxboxx run`, as the 0.2.x launcher): asks for your game folder once, keeps saves and caches in `%LOCALAPPDATA%\vi-mix`, 1920x1080 output |
+| **16-thread worker pools** also in the PowerShell launcher (`THIN 12 / UNDER 8 / LAND 6` on 16+ logical CPUs) | `anyxboxx run` has them since upstream #462; `tools/lancer_victory.ps1`, used by `-SeriesS`, did not |
+| `-SeriesS` switch | Passes `--console series-s` to VIctory, for comparison (it was slower here) |
 
-Everything else is AnyXboxX `main` as of 2026-11-27 (`4340aac`). Its own README is kept in [`docs/README-AnyXboxX.md`](docs/README-AnyXboxX.md).
+Pull requests included, with thanks to their authors (all open upstream when merged here):
+
+| PR | Author | What it does |
+|---|---|---|
+| [#444](https://github.com/LooperSalty/AnyXboxX/pull/444) | @KainanP | texture reads ask the texture, not process-wide tables under a lock |
+| [#446](https://github.com/LooperSalty/AnyXboxX/pull/446) | @Lewandox | retire kept host resources when dynamic descriptor slots are released |
+| [#451](https://github.com/LooperSalty/AnyXboxX/pull/451) | @Lewandox | exact upload block spans, zeroing and allocation outside the arena lock |
+| [#456](https://github.com/LooperSalty/AnyXboxX/pull/456) | @LooperSalty | shader translator fixes ported onto the Vice-Tay base |
+| [#457](https://github.com/LooperSalty/AnyXboxX/pull/457) | @LooperSalty | GPU pipeline fixes ported onto the Vice-Tay base |
+| [#458](https://github.com/LooperSalty/AnyXboxX/pull/458) | @Lewandox | zero fallback for missing root views, drop draws missing stride tables |
+| [#465](https://github.com/LooperSalty/AnyXboxX/pull/465) | @KainanP | idle textures leave the texture queue's share |
+| [#466](https://github.com/LooperSalty/AnyXboxX/pull/466) | @KainanP | every loose window copy counts against the window budget |
+
+Everything else is AnyXboxX `main` as of 2026-11-27 (`b62053f`, launcher 0.2.1). Its own README is kept in [`docs/README-AnyXboxX.md`](docs/README-AnyXboxX.md).
 
 ## How to use
 
@@ -44,9 +57,18 @@ Tip for NVIDIA RTX 40/50: turn on **Smooth Motion** for `victory.exe` in the NVI
 
 Windows 11, AMD Ryzen 7 5700X (8C/16T), 32 GB DDR4, NVIDIA RTX 5070 12 GB. Same save in the open world, warm shader cache, 90 s measured after shaders reached 0, frame lines with more than 3,000 draws:
 
+Same opening scene of that save (letterboxed, about 7,000 draws a frame):
+
 | Build | fps (mean / median) |
 |---|---|
-| **vi-mix** (AnyXboxX 2225a8e, Full HD, 16-thread pools, Series X) | **10.9 / 11.7** |
+| **vi-mix v7** (AnyXboxX b62053f, creator's settings, Full HD, + the 8 PRs) | **12.1 / 12.9** (min 8.0) |
+| AnyXboxX b62053f alone, creator's settings, Full HD | 7.2 / 7.4 |
+
+Earlier runs on the same save, different moments, for reference:
+
+| Build | fps (mean / median) |
+|---|---|
+| vi-mix v6 (AnyXboxX 2225a8e, Full HD, 16-thread pools, Series X) | 10.9 / 11.7 |
 | same, without the 16-thread pools | 9.1 / 9.6 |
 | same, Series S | 7.1 / 7.5 |
 | same, more card reserves (windows 2 GB, buffers 2.5 GB) | 6.0 / 6.2 |

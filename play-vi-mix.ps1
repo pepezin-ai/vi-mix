@@ -1,18 +1,19 @@
 <#
 .SYNOPSIS
-vi-mix: starts your own copy of the title through AnyXboxX (Vice-Tay VIctory base) with the
-settings that measured best on an RTX 5070 + Ryzen 7 5700X (see README.md).
+vi-mix: starts your own copy of the title through AnyXboxX with the creator's own settings
+(`anyxboxx run`, the same as the 0.2.x graphical launcher: Windows + NVIDIA profile, worker pools sized
+by the CPU, 1920x1080 output). See README.md for what this mix adds and what it measured.
 
 .PARAMETER GameDir
 Folder of your own unpacked copy (the one that holds game_scarlett_master.exe). Asked once and remembered
 in %LOCALAPPDATA%\vi-mix\game-dir.txt.
 
 .PARAMETER SeriesS
-Report a Series S to the title instead of a Series X (measured slower here: 7.1 against 10.9 fps).
+Report a Series S instead of a Series X, through tools\lancer_victory.ps1 (measured slower here).
 
 .PARAMETER NativeOutput
-Keep the title's own output size (4K on Series X) instead of forcing 1920x1080 (measured slower: 7.4 fps).
-Forcing 1080p also makes the HUD look larger, because the title lays it out for 1080p.
+Keep the title's own output size (4K on Series X) instead of 1920x1080 (measured slower here).
+1920x1080 also makes the HUD look larger, because the title lays it out for 1080p.
 
 .PARAMETER Warm
 Translate every shader into the cache before the game (first start of a new build: tens of minutes).
@@ -37,11 +38,24 @@ Set-Content -LiteralPath $remember -Value $GameDir -Encoding UTF8
 # Saves, caches and logs stay out of the game folder.
 $env:VICTORY_DATA_DIR = Join-Path $state 'data'
 
-$override = @{}
-if (-not $NativeOutput) { $override['VICTORY_OUTPUT'] = '1920x1080' }
-$lancer = Join-Path $PSScriptRoot 'tools\lancer_victory.ps1'
-$args2 = @{ GameDir = $GameDir; Override = $override }
-if ($SeriesS) { $args2['Console'] = 'series-s' }
-if ($Warm) { $args2['Warm'] = $true }
-& $lancer @args2
+if ($SeriesS) {
+    $override = @{}
+    if (-not $NativeOutput) { $override['VICTORY_OUTPUT'] = '1920x1080' }
+    $args2 = @{ GameDir = $GameDir; Override = $override; Console = 'series-s' }
+    if ($Warm) { $args2['Warm'] = $true }
+    & (Join-Path $PSScriptRoot 'tools\lancer_victory.ps1') @args2
+    exit $LASTEXITCODE
+}
+
+# The creator's path: build the anyxboxx command once, then let it build VIctory and start the game.
+$cli = Join-Path $PSScriptRoot 'target\release\anyxboxx.exe'
+if (-not (Test-Path -LiteralPath $cli)) {
+    Write-Host 'Building the anyxboxx command (first start only)...'
+    & cargo build --release -p anyxboxx --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml')
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit code $LASTEXITCODE)." }
+}
+$argv = @('run', '--game-dir', $GameDir)
+if (-not $NativeOutput) { $argv += @('--override', 'VICTORY_OUTPUT=1920x1080') }
+if ($Warm) { $argv += '--warm' }
+& $cli @argv
 exit $LASTEXITCODE
